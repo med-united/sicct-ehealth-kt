@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>de.servicehealtherx.ehealthkt</groupId>
+        <artifactId>sicct-ehealth-kt</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>gsmckt</artifactId>
+    <name>SICCT eHealth-KT :: gsmckt</name>
+    <description>gSMC-KT terminal identity and pairing signatures (software + PC/SC).</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>de.servicehealtherx.ehealthkt</groupId>
+            <artifactId>sicct-protocol</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk18on</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcpkix-jdk18on</artifactId>
+        </dependency>
+    </dependencies>
+</project>
