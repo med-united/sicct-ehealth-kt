@@ -20,4 +20,9 @@ public class InMemoryPairingStore implements PairingStore {
     public Optional<PairingBlock> findByPublicKey(String publicKeyHex) {
         return blocks.stream().filter(b -> b.containsPublicKey(publicKeyHex)).findFirst();
     }
+
+    @Override
+    public List<PairingBlock> all() {
+        return List.copyOf(blocks);
+    }
 }

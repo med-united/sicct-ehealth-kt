@@ -72,7 +72,7 @@ class SicctEndToEndTest {
 
         server = new SicctTlsServer(0, serverSsl,
                 () -> new SicctCommandInterpreter(cards, ui, pairingStore, authenticate,
-                        KonnektorCertValidator.acceptAll()),
+                        KonnektorCertValidator.acceptAll(), new SicctSessionRegistry()),
                 119, 30);
         port = server.start();
 
@@ -154,6 +154,12 @@ class SicctEndToEndTest {
         // 4) REQUEST ICC for slot 2 (now paired) -> ATR + 9000
         byte[] requestIcc = roundTrip((short) 0, (short) 4, "801202F1").getBody();
         assertThat(Hex.toHex(requestIcc)).endsWith("9000");
+
+        // 4a) RESET ICC for slot 2 -> 9001 (asynchronous/processor chipcard presented)
+        assertThat(Hex.toHex(roundTrip((short) 0, (short) 40, "801102F1").getBody())).isEqualTo("9001");
+
+        // 4b) RESET CT addressing the terminal (FU 0) -> 9000 (no chipcard type to qualify)
+        assertThat(Hex.toHex(roundTrip((short) 0, (short) 41, "80110000").getBody())).isEqualTo("9000");
 
         // 5) SELECT eGK application on slot 2 (ISO APDU addressed to the slot)
         assertThat(Hex.toHex(roundTrip((short) 2, (short) 5, "00A4040007D2760001448000").getBody()))

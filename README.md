@@ -35,23 +35,50 @@ Requires JDK 21+. Most-recent stable dependency versions are pinned in the paren
 
 ## Run
 
-Simulation mode (no hardware) — software gSMC-KT, simulated eGK in slot 2:
+The terminal runs against physical PC/SC readers. On start-up it scans every connected reader for a
+gSMC-KT and uses the first one it finds as its TLS server identity; the remaining readers are bound
+as card slots and the reader list is re-scanned periodically, so a reader plugged in after start-up
+is picked up automatically. An empty reader is fine — its slot simply reports "card absent".
 
 ```bash
-java -jar app/target/ehealth-kt.jar --mode SIM --port 4742
+java -jar app/target/ehealth-kt.jar --port 4742
 ```
 
-With the JavaFX display + PIN keypad (build `ui` with `-Pjavafx` and put JavaFX on the runtime
-module path), add `--ui JAVAFX`.
+With the JavaFX display + PIN keypad — build with the `javafx` profile (so `JavaFxTerminalUi` is
+compiled into the `ui` jar), then start with JavaFX on the module path and `--ui JAVAFX`.
 
-Hardware mode — gSMC-KT and cards in PC/SC readers:
+**Recommended — reuse the JavaFX jars Maven already downloaded** (no separate SDK download). The
+`-Pjavafx` build fetches the platform-specific `org.openjfx` jars into your local Maven repository
+(`~/.m2`); point `--module-path` straight at them:
 
 ```bash
-java -jar app/target/ehealth-kt.jar --mode PCSC --gsmckt-reader 0
+mvn -Pjavafx install                                  # build incl. the JavaFX UI, fetches JavaFX into ~/.m2
+
+M2=~/.m2/repository/org/openjfx
+JFX_VER=23.0.1
+JFX_CLASSIFIER=linux                                  # use: linux | linux-aarch64 | mac | mac-aarch64 | win
+java --module-path "$M2/javafx-base/$JFX_VER/javafx-base-$JFX_VER-$JFX_CLASSIFIER.jar:$M2/javafx-graphics/$JFX_VER/javafx-graphics-$JFX_VER-$JFX_CLASSIFIER.jar:$M2/javafx-controls/$JFX_VER/javafx-controls-$JFX_VER-$JFX_CLASSIFIER.jar" \
+     --add-modules javafx.controls \
+     -jar app/target/ehealth-kt.jar --port 4742 --ui JAVAFX
 ```
 
-Key options: `--mode SIM|PCSC`, `--port`, `--key-type RSA|EC`, `--ui HEADLESS|JAVAFX`,
-`--pairing-file`, `--egk-slot`, `--pin`, `--no-discovery`. See `--help`.
+**Alternative — download the JavaFX SDK explicitly:**
+
+```bash
+mvn -Pjavafx install                                  # build incl. the JavaFX UI
+
+wget -O /tmp/javafx-sdk.zip \
+     https://download2.gluonhq.com/openjfx/23.0.1/openjfx-23.0.1_linux-x64_bin-sdk.zip
+unzip -q /tmp/javafx-sdk.zip -d "$HOME/javafx"        # -> $HOME/javafx/javafx-sdk-23.0.1/lib
+
+java --module-path "$HOME/javafx/javafx-sdk-23.0.1/lib" --add-modules javafx.controls \
+     -jar app/target/ehealth-kt.jar --port 4742 --ui JAVAFX
+```
+
+If JavaFX is missing at runtime the app logs a warning and falls back to the headless UI.
+
+Key options: `--port`, `--ui HEADLESS|JAVAFX`, `--pairing-file`, `--pin`, `--terminal-name`,
+`--tsl-production`, `--no-konnektor-trust`, `--no-discovery`. See `--help`.
 
 ## Secure PIN entry
 
@@ -64,6 +91,6 @@ as an ISO format-2 PIN block. The verify APDUs follow the eHBA reference impleme
 Functional reference implementation: full SICCT command set, pairing, gSMC-KT signing, secure/remote
 PIN, status & service discovery, end-to-end tested over real mutual TLS without hardware
 (`terminal` → `SicctEndToEndTest`). Firmware update and the management interface are stubbed behind
-interfaces. Brainpool-curve TLS uses the BouncyCastle JSSE provider. A gSMC-KT-backed TLS key
-manager for `--mode PCSC` (card-resident TLS private key) is the main remaining piece for full
-hardware operation. ESD/hardware/CC-certification are out of scope.
+interfaces. Brainpool-curve TLS uses the BouncyCastle JSSE provider, with the gSMC-KT-backed TLS key
+manager presenting the card-resident SM-KT certificate and signing the handshake on the card.
+ESD/hardware/CC-certification are out of scope.

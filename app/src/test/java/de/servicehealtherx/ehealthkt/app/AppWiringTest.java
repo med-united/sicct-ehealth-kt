@@ -13,13 +13,13 @@ class AppWiringTest {
     @Test
     void parsesCliOptions() {
         EhealthKtApplication app = new EhealthKtApplication();
-        new CommandLine(app).parseArgs("--mode", "SIM", "--port", "0", "--key-type", "EC",
-                "--ui", "HEADLESS", "--egk-slot", "3", "--no-discovery");
-        assertThat(app.mode).isEqualTo(EhealthKtApplication.Mode.SIM);
+        new CommandLine(app).parseArgs("--port", "0", "--ui", "HEADLESS",
+                "--terminal-name", "KT-1", "--no-discovery", "--tsl-production");
         assertThat(app.port).isZero();
-        assertThat(app.keyType).isEqualTo(KeyType.EC);
-        assertThat(app.egkSlot).isEqualTo(3);
+        assertThat(app.uiKind).isEqualTo(EhealthKtApplication.UiKind.HEADLESS);
+        assertThat(app.terminalName).isEqualTo("KT-1");
         assertThat(app.noDiscovery).isTrue();
+        assertThat(app.tslProduction).isTrue();
     }
 
     @Test

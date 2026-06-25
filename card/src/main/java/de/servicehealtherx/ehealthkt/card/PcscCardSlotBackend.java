@@ -4,39 +4,109 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.smartcardio.CardTerminal;
-import javax.smartcardio.CardTerminals;
 import javax.smartcardio.TerminalFactory;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 /**
- * Binds each connected PC/SC reader to a card slot. Slot indices are 1-based in the order
- * the platform reports the readers.
+ * Binds each connected PC/SC reader to a card slot and keeps that binding up to date: a background
+ * task periodically re-enumerates the readers, so a reader plugged in after start-up is bound to a
+ * fresh slot automatically. Slot indices are 1-based and handed out in the order readers first
+ * appear; an index is never reused, so a slot stays stable for the lifetime of the terminal.
+ *
+ * <p>An empty reader is perfectly normal: the slot simply reports {@code CC_ABSENT} until a card is
+ * inserted (see {@link PcscCardSlot}). The backend never fails just because a reader holds no card.
  */
 public class PcscCardSlotBackend implements CardSlotBackend {
 
     private static final Logger log = LoggerFactory.getLogger(PcscCardSlotBackend.class);
 
-    private final List<CardSlot> slots = new ArrayList<>();
+    /** How often the connected PC/SC readers are re-enumerated, in milliseconds. */
+    public static final long DEFAULT_RESCAN_INTERVAL_MS = 2_000;
+
+    private final Supplier<List<CardTerminal>> readerSource;
+    private final Map<String, CardSlot> slotsByReaderName = new LinkedHashMap<>();
+    private final ScheduledExecutorService scanner;
+    private int nextIndex = 1;
 
     public PcscCardSlotBackend() {
+        this(defaultReaderSource(), DEFAULT_RESCAN_INTERVAL_MS);
+    }
+
+    /**
+     * @param readerSource      supplies the currently connected readers on each scan
+     * @param rescanIntervalMs  re-enumeration period; {@code <= 0} disables the background scan
+     */
+    PcscCardSlotBackend(Supplier<List<CardTerminal>> readerSource, long rescanIntervalMs) {
+        this.readerSource = readerSource;
+        rescan();
+        if (slots().isEmpty()) {
+            log.warn("No PC/SC readers connected yet; will keep scanning for newly connected readers");
+        }
+        if (rescanIntervalMs > 0) {
+            scanner = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "pcsc-reader-scan");
+                t.setDaemon(true);
+                return t;
+            });
+            scanner.scheduleWithFixedDelay(this::rescanQuietly,
+                    rescanIntervalMs, rescanIntervalMs, TimeUnit.MILLISECONDS);
+        } else {
+            scanner = null;
+        }
+    }
+
+    /** Re-enumerate readers now (test hook for the background scan). */
+    synchronized void rescanNow() {
+        rescan();
+    }
+
+    /** Bind any newly connected readers to fresh slots. Existing slots are left untouched. */
+    private synchronized void rescan() {
+        for (CardTerminal terminal : readerSource.get()) {
+            String name = terminal.getName();
+            if (!slotsByReaderName.containsKey(name)) {
+                int index = nextIndex++;
+                slotsByReaderName.put(name, new PcscCardSlot(index, terminal));
+                log.info("Bound slot {} to PC/SC reader '{}'", index, name);
+            }
+        }
+    }
+
+    private void rescanQuietly() {
         try {
-            CardTerminals terminals = TerminalFactory.getDefault().terminals();
-            int index = 1;
-            for (CardTerminal terminal : terminals.list()) {
-                log.info("Binding slot {} to PC/SC reader '{}'", index, terminal.getName());
-                slots.add(new PcscCardSlot(index++, terminal));
-            }
-            if (slots.isEmpty()) {
-                log.warn("No PC/SC readers found");
-            }
+            rescan();
         } catch (Exception e) {
-            throw new IllegalStateException("Could not enumerate PC/SC readers", e);
+            log.debug("PC/SC reader rescan failed", e);
         }
     }
 
     @Override
-    public List<CardSlot> slots() {
-        return slots;
+    public synchronized List<CardSlot> slots() {
+        return new ArrayList<>(slotsByReaderName.values());
+    }
+
+    @Override
+    public void close() {
+        if (scanner != null) {
+            scanner.shutdownNow();
+        }
+    }
+
+    private static Supplier<List<CardTerminal>> defaultReaderSource() {
+        return () -> {
+            try {
+                return TerminalFactory.getDefault().terminals().list();
+            } catch (Exception e) {
+                log.debug("Could not enumerate PC/SC readers", e);
+                return List.of();
+            }
+        };
     }
 }

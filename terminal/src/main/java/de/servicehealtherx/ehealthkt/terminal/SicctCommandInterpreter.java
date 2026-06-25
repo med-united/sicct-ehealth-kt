@@ -43,6 +43,12 @@ public class SicctCommandInterpreter extends SimpleChannelInboundHandler<SicctMe
 
     private static final AttributeKey<String> CLIENT_KEY = AttributeKey.valueOf("ehkt.clientPublicKeyHex");
     private static final AttributeKey<SicctState> STATE = AttributeKey.valueOf("ehkt.state");
+    /** The "EHEALTH EXPECT CHALLENGE RESPONSE" state: the ADD Phase 1 challenge awaiting Phase 2. */
+    private static final AttributeKey<PendingChallenge> EXPECT_CHALLENGE =
+            AttributeKey.valueOf("ehkt.expectChallengeResponse");
+
+    /** EHEALTH EXPECT CHALLENGE RESPONSE timeout (gemSpec_KT TIP1-A_3115): max 30 seconds. */
+    private static final long CHALLENGE_TTL_MILLIS = 30_000;
 
     private static final Logger log = LoggerFactory.getLogger(SicctCommandInterpreter.class);
 
@@ -51,14 +57,17 @@ public class SicctCommandInterpreter extends SimpleChannelInboundHandler<SicctMe
     private final PairingStore pairingStore;
     private final EhealthTerminalAuthenticate authenticate;
     private final KonnektorCertValidator certValidator;
+    private final SicctSessionRegistry sessions;
 
     public SicctCommandInterpreter(CardSlotManager cards, TerminalUi ui, PairingStore pairingStore,
-                                   EhealthTerminalAuthenticate authenticate, KonnektorCertValidator certValidator) {
+                                   EhealthTerminalAuthenticate authenticate, KonnektorCertValidator certValidator,
+                                   SicctSessionRegistry sessions) {
         this.cards = cards;
         this.ui = ui;
         this.pairingStore = pairingStore;
         this.authenticate = authenticate;
         this.certValidator = certValidator;
+        this.sessions = sessions;
     }
 
     @Override
@@ -74,6 +83,12 @@ public class SicctCommandInterpreter extends SimpleChannelInboundHandler<SicctMe
         super.userEventTriggered(ctx, evt);
     }
 
+    @Override
+    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+        sessions.unregister(ctx.channel());
+        super.channelInactive(ctx);
+    }
+
     private void onHandshakeComplete(ChannelHandlerContext ctx) {
         try {
             SslHandler ssl = ctx.pipeline().get(SslHandler.class);
@@ -86,6 +101,9 @@ public class SicctCommandInterpreter extends SimpleChannelInboundHandler<SicctMe
             ctx.attr(CLIENT_KEY).set(keyHex);
             ctx.attr(STATE).set(pairingStore.isPaired(keyHex)
                     ? SicctState.CLIENT_WITH_PAIRING : SicctState.CLIENT_WITHOUT_PAIRING);
+            if (ctx.attr(STATE).get() == SicctState.CLIENT_WITH_PAIRING) {
+                sessions.register(ctx.channel());
+            }
             log.info("TLS client connected, state={}", ctx.attr(STATE).get());
         } catch (Exception e) {
             log.warn("Could not evaluate client certificate", e);
@@ -113,6 +131,11 @@ public class SicctCommandInterpreter extends SimpleChannelInboundHandler<SicctMe
     }
 
     private void dispatch(ChannelHandlerContext ctx, SicctMessage msg, SicctState state) {
+        // TIP1-A_3113: the EHEALTH EXPECT CHALLENGE RESPONSE state (and its challenge) is lost as
+        // soon as any command other than EHEALTH TERMINAL AUTHENTICATE ADD Phase 2 (P2=04) runs.
+        if (!isAddPhase2(msg)) {
+            ctx.attr(EXPECT_CHALLENGE).set(null);
+        }
         short slot = msg.getSlot();
         if (slot != 0) {
             // ISO-7816 APDU addressed to an ICC slot
@@ -139,7 +162,7 @@ public class SicctCommandInterpreter extends SimpleChannelInboundHandler<SicctMe
             case INS_INIT_CT_SESSION -> reply(ctx, msg, StatusWord.SUCCESS.toBytes());
             case INS_CLOSE_CT_SESSION -> reply(ctx, msg, StatusWord.SUCCESS.toBytes());
             case INS_GET_STATUS -> reply(ctx, msg, getStatus(msg));
-            case INS_RESET_CT -> reply(ctx, msg, StatusWord.SUCCESS.toBytes());
+            case INS_RESET_CT -> reply(ctx, msg, resetCtIcc(msg, state));
             case INS_REQUEST_ICC -> {
                 requirePairing(state);
                 reply(ctx, msg, requestIcc(msg));
@@ -173,13 +196,38 @@ public class SicctCommandInterpreter extends SimpleChannelInboundHandler<SicctMe
         switch (p2) {
             case 0x01 -> { // CREATE — allowed without pairing
                 payload = authenticate.create(msg.commandData(), clientKey);
-                // pairing may now exist; refresh state
+                // pairing may now exist; refresh state and start receiving card events
                 if (pairingStore.isPaired(clientKey)) {
                     ctx.attr(STATE).set(SicctState.CLIENT_WITH_PAIRING);
+                    sessions.register(ctx.channel());
                 }
             }
             case 0x02 -> { // VALIDATE
                 payload = authenticate.validate(msg.commandData(), clientKey);
+            }
+            case 0x03 -> { // ADD Phase 1 — generate challenge (allowed without pairing)
+                byte[] challenge = authenticate.addPhase1(msg.getLe());
+                if (challenge == null) {
+                    payload = StatusWord.WRONG_LENGTH.toBytes();
+                } else {
+                    ctx.attr(EXPECT_CHALLENGE).set(
+                            new PendingChallenge(challenge, System.currentTimeMillis() + CHALLENGE_TTL_MILLIS));
+                    payload = challenge;
+                }
+            }
+            case 0x04 -> { // ADD Phase 2 — verify shared-secret knowledge, bind this Konnektor key
+                PendingChallenge pending = ctx.attr(EXPECT_CHALLENGE).get();
+                ctx.attr(EXPECT_CHALLENGE).set(null); // leave EXPECT CHALLENGE RESPONSE regardless
+                if (pending == null || pending.isExpired(System.currentTimeMillis())) {
+                    log.info("ADD Phase 2 without a pending challenge (not in EXPECT CHALLENGE RESPONSE)");
+                    payload = StatusWord.COMMAND_NOT_ALLOWED.toBytes();
+                } else {
+                    payload = authenticate.addPhase2(pending.challenge(), msg.commandData(), clientKey);
+                    if (pairingStore.isPaired(clientKey)) {
+                        ctx.attr(STATE).set(SicctState.CLIENT_WITH_PAIRING);
+                        sessions.register(ctx.channel());
+                    }
+                }
             }
             default -> {
                 log.info("EHEALTH TERMINAL AUTHENTICATE P2={} not supported", Hex.toHex(p2));
@@ -187,6 +235,27 @@ public class SicctCommandInterpreter extends SimpleChannelInboundHandler<SicctMe
             }
         }
         reply(ctx, msg, payload);
+    }
+
+    /**
+     * SICCT RESET CT / ICC (INS 0x11). The addressed Functional Unit decides the success status
+     * (SICCT 5.12.6): a RESET of the terminal (FU/slot 0) returns 9000, while a RESET of an ICC slot
+     * returns SW2 = card type after reset — 01 for an asynchronous (processor) chipcard such as an
+     * eGK/HBA/SMC-B, i.e. 9001. An empty slot yields 64A1 (no card present).
+     */
+    private byte[] resetCtIcc(SicctMessage msg, SicctState state) {
+        int slot = slotOf(msg);
+        if (slot == 0) {
+            // RESET CT: reset the terminal and deactivate all slots; no chipcard type to qualify.
+            return StatusWord.SUCCESS.toBytes();
+        }
+        // RESET ICC activates a chipcard (alternative to REQUEST ICC), so it requires a pairing.
+        requirePairing(state);
+        IccStatus status = cards.requestIcc(slot);
+        if (status == null || status == IccStatus.CC_ABSENT) {
+            return StatusWord.ICC_NOT_PRESENT.toBytes();
+        }
+        return StatusWord.RESET_ASYNC_SUCCESS.toBytes();
     }
 
     private byte[] requestIcc(SicctMessage msg) {
@@ -233,17 +302,35 @@ public class SicctCommandInterpreter extends SimpleChannelInboundHandler<SicctMe
 
     private byte[] getStatus(SicctMessage msg) {
         byte p2 = msg.getP2();
-        // ICC status object (P2=0x80): a status byte per slot
+        // ICC Status Data Object, P2='80' (SICCT 5.5.10.7 / 5.15.5): the response body is the
+        // TLV  80 <len> <ICCSB...>  followed by SW 9000, one ICC status byte per slot. The CT
+        // (FU/slot 0) is addressed for "all ICC interfaces"; a non-zero FU requests just that ICC.
         if (p2 == (byte) 0x80) {
-            byte[] statuses = new byte[cards.slots().size()];
-            int i = 0;
-            for (var slot : cards.slots()) {
-                statuses[i++] = slot.status().value();
-            }
-            return Hex.concat(statuses, StatusWord.SUCCESS.toBytes());
+            return iccStatusDataObject(slotOf(msg));
         }
         // Other status objects: acknowledge with success (minimal functional response).
         return StatusWord.SUCCESS.toBytes();
+    }
+
+    /** Build the ICC Status Data Object (ICCS DO) {@code 80 <len> <status bytes>} plus SW 9000. */
+    private byte[] iccStatusDataObject(int addressedSlot) {
+        byte[] statusBytes;
+        if (addressedSlot == 0) {
+            var slots = cards.slots();
+            statusBytes = new byte[slots.size()];
+            int i = 0;
+            for (var slot : slots) {
+                statusBytes[i++] = slot.status().value();
+            }
+        } else {
+            statusBytes = new byte[]{cards.iccStatus(addressedSlot).value()};
+        }
+        // BER length is single-byte: SICCT addresses at most 14 ICC interfaces (len <= 127).
+        byte[] iccsDo = new byte[2 + statusBytes.length];
+        iccsDo[0] = (byte) 0x80;                // ICC Status Data Object tag
+        iccsDo[1] = (byte) statusBytes.length;  // length = number of status bytes
+        System.arraycopy(statusBytes, 0, iccsDo, 2, statusBytes.length);
+        return Hex.concat(iccsDo, StatusWord.SUCCESS.toBytes());
     }
 
     private int slotOf(SicctMessage msg) {
@@ -276,6 +363,22 @@ public class SicctCommandInterpreter extends SimpleChannelInboundHandler<SicctMe
         ctx.close();
     }
 
+    /** Whether {@code msg} is EHEALTH TERMINAL AUTHENTICATE ADD Phase 2 (CLA 81, INS AA, P2 04). */
+    private boolean isAddPhase2(SicctMessage msg) {
+        byte[] body = msg.getBody();
+        return body.length >= 4
+                && body[0] == (byte) 0x81
+                && body[1] == INS_EHEALTH_TERMINAL_AUTHENTICATE
+                && body[3] == 0x04;
+    }
+
     private static final class NotPairedException extends RuntimeException {
+    }
+
+    /** A challenge generated by ADD Phase 1, awaiting the matching ADD Phase 2, with its deadline. */
+    private record PendingChallenge(byte[] challenge, long expiresAtMillis) {
+        boolean isExpired(long nowMillis) {
+            return nowMillis > expiresAtMillis;
+        }
     }
 }

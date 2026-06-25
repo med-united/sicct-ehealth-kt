@@ -139,6 +139,21 @@ public class SicctMessage {
     }
 
     /**
+     * The length of the expected response data field (Le) of the APDU in this message. For a Case 2
+     * command (e.g. EHEALTH TERMINAL AUTHENTICATE ADD Phase 1, {@code CLA INS P1 P2 Le}) this is the
+     * trailing byte. A short-form {@code Le} of {@code 00} denotes 256 (ISO 7816-4). Returns 0 if the
+     * APDU carries no Le byte.
+     */
+    public int getLe() {
+        byte[] body = getBody();
+        if (body.length < 5) {
+            return 0;
+        }
+        int le = body[body.length - 1] & 0xff;
+        return le == 0 ? 256 : le;
+    }
+
+    /**
      * Identify the addressed slot of a SICCT command message (type {@code 6B}, CLA {@code 80}),
      * handling both direct coding (P1) and reference coding (ASN.1 FUI DO). Returns {@code null}
      * if this is not a SICCT terminal command.

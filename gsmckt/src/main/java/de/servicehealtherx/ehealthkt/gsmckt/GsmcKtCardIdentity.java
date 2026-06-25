@@ -144,6 +144,27 @@ public class GsmcKtCardIdentity implements TerminalIdentity {
         return pso(sharedSecret, (byte) 0x05, (byte) 0x02);
     }
 
+    /**
+     * Draw {@code length} random bytes from the gSMC-KT RNG via GET CHALLENGE (ISO 7816-4,
+     * {@code 00 84 00 00 Le}). Falls back to a JCA SecureRandom if the card rejects the command,
+     * so the EHEALTH TERMINAL AUTHENTICATE (ADD Phase 1) flow never breaks on RNG availability.
+     */
+    @Override
+    public byte[] randomBytes(int length) {
+        try {
+            byte[] getChallenge = {0x00, (byte) 0x84, 0x00, 0x00, (byte) length};
+            byte[] random = transmit("GET CHALLENGE", getChallenge, false);
+            if (random != null && random.length == length) {
+                return random;
+            }
+            log.warn("GET CHALLENGE returned {} bytes, expected {}; falling back to SecureRandom",
+                    random == null ? 0 : random.length, length);
+        } catch (RuntimeException e) {
+            log.warn("GET CHALLENGE failed; falling back to SecureRandom", e);
+        }
+        return TerminalIdentity.super.randomBytes(length);
+    }
+
     private byte[] pso(byte[] message, byte algId, byte keyRef) {
         transmit("SELECT DF.KT", SELECT_DF_KT, false);
         // MSE: select private key + algorithm

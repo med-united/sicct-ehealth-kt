@@ -1,17 +1,13 @@
 package de.servicehealtherx.ehealthkt.app;
 
-import de.servicehealtherx.ehealthkt.card.CardSlotBackend;
 import de.servicehealtherx.ehealthkt.card.CardSlotManager;
 import de.servicehealtherx.ehealthkt.card.PcscCardSlotBackend;
-import de.servicehealtherx.ehealthkt.card.SimulatedCardSlotBackend;
-import de.servicehealtherx.ehealthkt.card.sim.ScriptedVirtualCard;
 import de.servicehealtherx.ehealthkt.gsmckt.GsmcKtCardIdentity;
-import de.servicehealtherx.ehealthkt.gsmckt.KeyType;
-import de.servicehealtherx.ehealthkt.gsmckt.SoftwareTerminalIdentity;
-import de.servicehealtherx.ehealthkt.gsmckt.TerminalIdentity;
+import de.servicehealtherx.ehealthkt.terminal.CardPresenceMonitor;
 import de.servicehealtherx.ehealthkt.terminal.EhealthTerminalAuthenticate;
 import de.servicehealtherx.ehealthkt.terminal.KonnektorCertValidator;
 import de.servicehealtherx.ehealthkt.terminal.SicctCommandInterpreter;
+import de.servicehealtherx.ehealthkt.terminal.SicctSessionRegistry;
 import de.servicehealtherx.ehealthkt.terminal.SicctTlsServer;
 import de.servicehealtherx.ehealthkt.terminal.pairing.FilePairingStore;
 import de.servicehealtherx.ehealthkt.terminal.pairing.PairingStore;
@@ -26,14 +22,18 @@ import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 
+import javax.net.ssl.TrustManager;
 import javax.smartcardio.CardTerminal;
 import javax.smartcardio.TerminalFactory;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.concurrent.Callable;
 
 /**
- * Entry point for the standalone eHealth-KT. Wires the gSMC-KT identity, card slots, user interface
- * and pairing store and starts the SICCT TLS server (and service discovery).
+ * Entry point for the standalone eHealth-KT. The terminal runs against physical PC/SC readers: it
+ * scans every connected reader for a gSMC-KT to use as its TLS server identity, binds the remaining
+ * readers as card slots (re-scanning for newly connected readers while it runs), wires the user
+ * interface and pairing store and starts the SICCT TLS server (and service discovery).
  */
 @Command(name = "ehealth-kt", mixinStandardHelpOptions = true, version = "eHealth-KT 1.0.0",
         description = "Standalone SICCT eHealth-Kartenterminal (gemSpec_KT).")
@@ -41,18 +41,10 @@ public class EhealthKtApplication implements Callable<Integer> {
 
     private static final Logger log = LoggerFactory.getLogger(EhealthKtApplication.class);
 
-    enum Mode {SIM, PCSC}
-
     enum UiKind {HEADLESS, JAVAFX}
-
-    @Option(names = "--mode", description = "Card/identity backend: ${COMPLETION-CANDIDATES}. Default: SIM")
-    Mode mode = Mode.SIM;
 
     @Option(names = "--port", description = "SICCT TLS port. Default: 4742")
     int port = SicctTlsServer.DEFAULT_PORT;
-
-    @Option(names = "--key-type", description = "SIM identity key type: ${COMPLETION-CANDIDATES}. Default: EC")
-    KeyType keyType = KeyType.EC;
 
     @Option(names = "--ui", description = "User interface: ${COMPLETION-CANDIDATES}. Default: HEADLESS")
     UiKind uiKind = UiKind.HEADLESS;
@@ -60,28 +52,19 @@ public class EhealthKtApplication implements Callable<Integer> {
     @Option(names = "--pairing-file", description = "Pairing store file. Default: ./pairing.json")
     Path pairingFile = Path.of("pairing.json");
 
-    @Option(names = "--egk-slot", description = "SIM mode: slot to insert a simulated eGK. Default: 2")
-    int egkSlot = 2;
-
-    @Option(names = "--sim-slots", description = "SIM mode: number of card slots. Default: 4")
-    int simSlots = 4;
-
     @Option(names = "--pin", description = "HEADLESS UI: PIN to supply on PERFORM VERIFICATION. Default: 123456")
     String headlessPin = "123456";
 
-    @Option(names = "--gsmckt-reader", description = "PCSC mode: PC/SC reader index of the gSMC-KT. Default: 0")
-    int gsmcktReader = 0;
-
-    @Option(names = "--tsl-production", description = "PCSC mode: use the production (PU) gematik TSL "
-            + "instead of the reference/test (RU) TSL. Default: false (use RU for TEST-ONLY cards).")
+    @Option(names = "--tsl-production", description = "Use the production (PU) gematik TSL instead of "
+            + "the reference/test (RU) TSL. Default: false (use RU for TEST-ONLY cards).")
     boolean tslProduction;
 
-    @Option(names = "--tsl-cache-dir", description = "PCSC mode: directory for the cached gematik TSL. "
+    @Option(names = "--tsl-cache-dir", description = "Directory for the cached gematik TSL. "
             + "Default: ./tsl-cache")
     Path tslCacheDir = Path.of("tsl-cache");
 
-    @Option(names = "--no-konnektor-trust", description = "PCSC mode: skip gematik TUC_PKI_018 "
-            + "validation of the Konnektor client certificate (accept any chain). For local testing only.")
+    @Option(names = "--no-konnektor-trust", description = "Skip gematik TUC_PKI_018 validation of the "
+            + "Konnektor client certificate (accept any chain). For local testing only.")
     boolean noKonnektorTrust;
 
     @Option(names = "--terminal-name", description = "Terminal name announced via service discovery.")
@@ -98,17 +81,19 @@ public class EhealthKtApplication implements Callable<Integer> {
 
     @Override
     public Integer call() throws Exception {
-        TerminalIdentity identity = buildIdentity();
-        CardSlotBackend backend = buildCardBackend();
-        CardSlotManager cards = new CardSlotManager(backend);
+        GsmcKtCardIdentity identity = discoverGsmcKt();
+        CardSlotManager cards = new CardSlotManager(new PcscCardSlotBackend());
         TerminalUi ui = buildUi();
         PairingStore pairingStore = new FilePairingStore(pairingFile);
         EhealthTerminalAuthenticate authenticate = new EhealthTerminalAuthenticate(identity, pairingStore, ui);
         SslContext sslContext = buildSslContext(identity);
 
+        SicctSessionRegistry sessions = new SicctSessionRegistry();
+        CardPresenceMonitor cardMonitor = new CardPresenceMonitor(cards, sessions);
+
         SicctTlsServer server = new SicctTlsServer(port, sslContext,
                 () -> new SicctCommandInterpreter(cards, ui, pairingStore, authenticate,
-                        KonnektorCertValidator.acceptAll()),
+                        KonnektorCertValidator.acceptAll(), sessions),
                 readerIdle, writerIdle);
 
         ServiceDiscoveryServer discovery = noDiscovery ? null : new ServiceDiscoveryServer(port, terminalName);
@@ -130,6 +115,7 @@ public class EhealthKtApplication implements Callable<Integer> {
             }
             management.stop();
             server.close();
+            cardMonitor.close();
             try {
                 cards.close();
             } catch (Exception ignored) {
@@ -137,35 +123,42 @@ public class EhealthKtApplication implements Callable<Integer> {
             }
         }));
 
-        log.info("eHealth-KT '{}' running in {} mode on port {} ({} UI). Press Ctrl+C to stop.",
-                terminalName, mode, boundPort, uiKind);
+        log.info("eHealth-KT '{}' running on port {} ({} UI). Press Ctrl+C to stop.",
+                terminalName, boundPort, uiKind);
         Thread.currentThread().join();
         return 0;
     }
 
-    private TerminalIdentity buildIdentity() {
-        if (mode == Mode.SIM) {
-            log.info("Using software gSMC-KT identity ({})", keyType);
-            return new SoftwareTerminalIdentity(keyType);
-        }
-        CardTerminal terminal = pcscReader(gsmcktReader);
+    /**
+     * Scan every connected PC/SC reader for a gSMC-KT and return the first usable one. Empty readers,
+     * and readers holding a card that is not a gSMC-KT, are skipped — an empty reader is normal.
+     */
+    private GsmcKtCardIdentity discoverGsmcKt() {
+        List<CardTerminal> readers;
         try {
-            return new GsmcKtCardIdentity(terminal.connect("*").getBasicChannel());
+            readers = TerminalFactory.getDefault().terminals().list();
         } catch (Exception e) {
-            throw new IllegalStateException("Could not open gSMC-KT in reader " + gsmcktReader, e);
+            throw new IllegalStateException("Could not enumerate PC/SC readers", e);
         }
-    }
-
-    private CardSlotBackend buildCardBackend() {
-        if (mode == Mode.SIM) {
-            SimulatedCardSlotBackend backend = new SimulatedCardSlotBackend(simSlots);
-            if (egkSlot >= 1 && egkSlot <= simSlots) {
-                backend.simulatedSlot(egkSlot).insert(ScriptedVirtualCard.egk());
-                log.info("Inserted simulated eGK into slot {}", egkSlot);
+        if (readers.isEmpty()) {
+            throw new IllegalStateException("No PC/SC readers connected; cannot find a gSMC-KT");
+        }
+        for (CardTerminal reader : readers) {
+            try {
+                if (!reader.isCardPresent()) {
+                    log.debug("Reader '{}' is empty, skipping gSMC-KT probe", reader.getName());
+                    continue;
+                }
+                GsmcKtCardIdentity identity =
+                        new GsmcKtCardIdentity(reader.connect("*").getBasicChannel());
+                log.info("Using gSMC-KT in PC/SC reader '{}'", reader.getName());
+                return identity;
+            } catch (Exception e) {
+                log.debug("Reader '{}' does not hold a usable gSMC-KT: {}", reader.getName(), e.toString());
             }
-            return backend;
         }
-        return new PcscCardSlotBackend();
+        throw new IllegalStateException("No gSMC-KT found in any of the " + readers.size()
+                + " connected PC/SC reader(s)");
     }
 
     private TerminalUi buildUi() {
@@ -174,39 +167,27 @@ public class EhealthKtApplication implements Callable<Integer> {
                 return (TerminalUi) Class.forName("de.servicehealtherx.ehealthkt.ui.JavaFxTerminalUi")
                         .getDeclaredConstructor().newInstance();
             } catch (Throwable t) {
-                log.warn("JavaFX UI not available ({}); falling back to headless. "
-                        + "Build the ui module with -Pjavafx and add JavaFX to the runtime.", t.toString());
+                Throwable cause = t instanceof java.lang.reflect.InvocationTargetException && t.getCause() != null
+                        ? t.getCause() : t;
+                log.warn("JavaFX UI not available; falling back to headless. "
+                        + "Build the ui module with -Pjavafx and add JavaFX to the runtime.", cause);
             }
         }
         return HeadlessUi.withPin(headlessPin);
     }
 
-    private SslContext buildSslContext(TerminalIdentity identity) throws Exception {
-        if (identity instanceof SoftwareTerminalIdentity sw) {
-            return TlsContextFactory.forSoftwareIdentity(sw);
+    private SslContext buildSslContext(GsmcKtCardIdentity card) throws Exception {
+        TrustManager konnektorTrust = null;
+        if (!noKonnektorTrust) {
+            log.info("Loading gematik {} TSL for Konnektor TUC_PKI_018 validation",
+                    tslProduction ? "production (PU)" : "reference/test (RU)");
+            TslDownloader tsl = new TslDownloader(tslProduction, tslCacheDir);
+            tsl.refresh();
+            konnektorTrust = GematikKonnektorTrust.clientTrustManager(tsl);
+        } else {
+            log.warn("Konnektor TUC_PKI_018 validation disabled (--no-konnektor-trust); accepting any client cert");
         }
-        if (identity instanceof GsmcKtCardIdentity card) {
-            javax.net.ssl.TrustManager konnektorTrust = null;
-            if (!noKonnektorTrust) {
-                log.info("Loading gematik {} TSL for Konnektor TUC_PKI_018 validation",
-                        tslProduction ? "production (PU)" : "reference/test (RU)");
-                TslDownloader tsl = new TslDownloader(tslProduction, tslCacheDir);
-                tsl.refresh();
-                konnektorTrust = GematikKonnektorTrust.clientTrustManager(tsl);
-            } else {
-                log.warn("Konnektor TUC_PKI_018 validation disabled (--no-konnektor-trust); accepting any client cert");
-            }
-            return TlsContextFactory.forCardIdentity(card, konnektorTrust);
-        }
-        throw new IllegalStateException("Unsupported terminal identity: " + identity.getClass().getName());
-    }
-
-    private static CardTerminal pcscReader(int index) {
-        try {
-            return TerminalFactory.getDefault().terminals().list().get(index);
-        } catch (Exception e) {
-            throw new IllegalStateException("No PC/SC reader at index " + index, e);
-        }
+        return TlsContextFactory.forCardIdentity(card, konnektorTrust);
     }
 
     public static void main(String[] args) {

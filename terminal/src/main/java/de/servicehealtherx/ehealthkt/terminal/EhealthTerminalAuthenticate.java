@@ -24,6 +24,13 @@ import java.util.Optional;
  *   Konnektor's TLS public key and returns the gSMC-KT signature over the shared secret.</li>
  *   <li><b>VALIDATE (P2=02)</b>: Konnektor sends a challenge (DO 0xD5, 16..127 bytes). The terminal
  *   returns SHA-256(challenge || shared secret) for the pairing bound to the Konnektor's key.</li>
+ *   <li><b>ADD Phase 1 (P2=03)</b>: the terminal draws a challenge of {@code Le} bytes from the
+ *   SM-KT RNG, remembers it (state "EHEALTH EXPECT CHALLENGE RESPONSE", owned by the connection
+ *   handler) and returns it.</li>
+ *   <li><b>ADD Phase 2 (P2=04)</b>: Konnektor returns SHA-256(challenge || shared secret) (DO 0xD6,
+ *   32 bytes). The terminal recomputes the hash for every stored pairing block; on a unique match it
+ *   binds the Konnektor's current TLS public key to that block (adding an additional Konnektor to an
+ *   existing shared secret).</li>
  * </ul>
  *
  * Each method returns the raw response payload (signature/hash) or a 2-byte error status word.
@@ -33,6 +40,13 @@ public class EhealthTerminalAuthenticate {
     private static final int TAG_SHARED_SECRET = 0xD4;
     private static final int TAG_APPLICATION_LABEL = 0x50;
     private static final int TAG_SHARED_SECRET_CHALLENGE = 0xD5;
+    private static final int TAG_SHARED_SECRET_RESPONSE = 0xD6;
+
+    /** Minimum challenge length for ADD Phase 1 (gemSpec_KT SEQ_KT_0003 step 1, Le range '10'..'7F'). */
+    private static final int MIN_CHALLENGE_LENGTH = 16;
+    private static final int MAX_CHALLENGE_LENGTH = 127;
+    /** The Shared Secret Response DO carries a SHA-256 hash, i.e. exactly 32 bytes. */
+    private static final int SHARED_SECRET_RESPONSE_LENGTH = 32;
 
     private static final Logger log = LoggerFactory.getLogger(EhealthTerminalAuthenticate.class);
 
@@ -93,13 +107,81 @@ public class EhealthTerminalAuthenticate {
             log.warn("VALIDATE no pairing for key {}", clientPublicKeyHex);
             return StatusWord.COMMAND_NOT_ALLOWED.toBytes();
         }
-        // SHA-256(challenge || shared secret)
-        byte[] secret = Hex.toBytes(block.get().getSharedSecretHex());
-        byte[] toHash = Hex.concat(challengeTlv.value(), secret);
+        return sharedSecretHash(challengeTlv.value(), block.get());
+    }
+
+    /**
+     * ADD Phase 1 (P2=03). Draw a challenge of {@code requestedLength} bytes from the SM-KT RNG.
+     * Returns the challenge on success, or {@code null} if {@code requestedLength} is out of the
+     * permitted range (the caller maps that to a wrong-length status word and stays out of the
+     * EHEALTH EXPECT CHALLENGE RESPONSE state).
+     */
+    public byte[] addPhase1(int requestedLength) {
+        if (requestedLength < MIN_CHALLENGE_LENGTH || requestedLength > MAX_CHALLENGE_LENGTH) {
+            log.warn("ADD Phase 1 requested challenge length {} out of range [{}, {}]",
+                    requestedLength, MIN_CHALLENGE_LENGTH, MAX_CHALLENGE_LENGTH);
+            return null;
+        }
+        return identity.randomBytes(requestedLength);
+    }
+
+    /**
+     * ADD Phase 2 (P2=04). {@code challenge} is the value generated in Phase 1; {@code commandData}
+     * carries the Shared Secret Response DO (0xD6); {@code clientPublicKeyHex} is the encoded
+     * Konnektor TLS public key from the current handshake. On a unique match the Konnektor key is
+     * bound to the matching pairing block and SW 9000 is returned; otherwise a 2-byte error status.
+     */
+    public byte[] addPhase2(byte[] challenge, byte[] commandData, String clientPublicKeyHex) {
+        List<Tlv> tlvs = Tlv.parseList(commandData);
+        Tlv responseTlv = Tlv.find(tlvs, TAG_SHARED_SECRET_RESPONSE);
+        if (responseTlv == null) {
+            log.warn("ADD Phase 2 missing shared secret response");
+            return StatusWord.REFERENCED_DATA_NOT_FOUND.toBytes();
+        }
+        if (responseTlv.value().length != SHARED_SECRET_RESPONSE_LENGTH) {
+            log.warn("ADD Phase 2 shared secret response must be {} bytes, was {}",
+                    SHARED_SECRET_RESPONSE_LENGTH, responseTlv.value().length);
+            return StatusWord.INCORRECT_DATA_FIELD.toBytes();
+        }
+        byte[] expected = responseTlv.value();
+
+        // Recompute SHA-256(challenge || shared secret) for every block; require a unique match.
+        PairingBlock match = null;
+        for (PairingBlock block : pairingStore.all()) {
+            byte[] hash = sharedSecretHash(challenge, block);
+            if (java.security.MessageDigest.isEqual(hash, expected)) {
+                if (match != null) {
+                    log.warn("ADD Phase 2 hash matched more than one pairing block; rejecting");
+                    return StatusWord.NO_INFORMATION.toBytes();
+                }
+                match = block;
+            }
+        }
+        if (match == null) {
+            log.warn("ADD Phase 2 no pairing block matched the shared secret response");
+            return StatusWord.NO_INFORMATION.toBytes();
+        }
+
+        // If the new key already lives in a different block, remove it there before binding it here.
+        for (PairingBlock other : pairingStore.all()) {
+            if (other != match) {
+                other.removePublicKey(clientPublicKeyHex);
+            }
+        }
+        match.bindPublicKey(clientPublicKeyHex);
+        pairingStore.update(match);
+        log.info("ADD: bound Konnektor key {}… to existing pairing block",
+                clientPublicKeyHex.substring(0, Math.min(12, clientPublicKeyHex.length())));
+        return StatusWord.SUCCESS.toBytes();
+    }
+
+    /** SHA-256(challenge || shared secret of {@code block}); a {@link StatusWord} on hash failure. */
+    private byte[] sharedSecretHash(byte[] challenge, PairingBlock block) {
+        byte[] secret = Hex.toBytes(block.getSharedSecretHex());
         try {
-            return MessageDigest.getInstance("SHA-256").digest(toHash);
+            return MessageDigest.getInstance("SHA-256").digest(Hex.concat(challenge, secret));
         } catch (Exception e) {
-            log.error("VALIDATE could not hash", e);
+            log.error("Could not compute shared secret hash", e);
             return StatusWord.COMMAND_NOT_ALLOWED.toBytes();
         }
     }

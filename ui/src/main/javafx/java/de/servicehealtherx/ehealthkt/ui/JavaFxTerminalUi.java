@@ -27,11 +27,11 @@ public class JavaFxTerminalUi implements TerminalUi {
 
     private static final AtomicBoolean FX_STARTED = new AtomicBoolean(false);
 
-    private final Label displayLine1 = new Label("");
-    private final Label displayLine2 = new Label("");
-    private final PasswordField pinField = new PasswordField();
-    private final VBox pinPane;
-    private final HBox confirmBar;
+    private Label displayLine1;
+    private Label displayLine2;
+    private PasswordField pinField;
+    private VBox pinPane;
+    private HBox confirmBar;
     private Stage stage;
 
     private final SynchronousQueue<char[]> pinResult = new SynchronousQueue<>();
@@ -39,9 +39,17 @@ public class JavaFxTerminalUi implements TerminalUi {
 
     public JavaFxTerminalUi() {
         startToolkit();
-        this.pinPane = buildPinPane();
-        this.confirmBar = buildConfirmBar();
-        runAndWait(this::buildStage);
+        // JavaFX Controls must be constructed only after the toolkit is running, and on the FX
+        // thread. Creating them as inline field initializers runs them before startToolkit() and
+        // triggers Control.<clinit> -> "Toolkit not initialized".
+        runAndWait(() -> {
+            displayLine1 = new Label("");
+            displayLine2 = new Label("");
+            pinField = new PasswordField();
+            pinPane = buildPinPane();
+            confirmBar = buildConfirmBar();
+            buildStage();
+        });
     }
 
     private static void startToolkit() {

@@ -5,6 +5,8 @@ package de.servicehealtherx.ehealthkt.sicct;
  */
 public enum StatusWord {
     SUCCESS(0x9000, "Command successfully executed"),
+    RESET_ASYNC_SUCCESS(0x9001, "Reset successful, asynchronous (processor) chipcard presented"),
+    ICC_NOT_PRESENT(0x64A1, "Reset not successful, no chipcard present in addressed slot"),
     COMMAND_NOT_ALLOWED(0x6900, "Command not allowed (no information given)"),
     COMMAND_NOT_ALLOWED_INVALID_CLIENT(0x6901, "Command not allowed (invalid client / no pairing)"),
     SECURITY_CONDITION_NOT_SATISFIED(0x6982, "Security condition not satisfied"),

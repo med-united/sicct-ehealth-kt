@@ -32,6 +32,18 @@ public interface TerminalIdentity extends AutoCloseable {
      */
     byte[] signPairingSecret(byte[] sharedSecret);
 
+    /**
+     * Generate {@code length} random bytes using the SM-KT random number generator, as required for
+     * the challenge of EHEALTH TERMINAL AUTHENTICATE (ADD Phase 1, gemSpec_KT SEQ_KT_0003 step 1).
+     * The default uses a JCA {@link java.security.SecureRandom}; a real gSMC-KT overrides this to
+     * draw from the card's RNG (GET CHALLENGE).
+     */
+    default byte[] randomBytes(int length) {
+        byte[] out = new byte[length];
+        new java.security.SecureRandom().nextBytes(out);
+        return out;
+    }
+
     @Override
     default void close() {
     }
