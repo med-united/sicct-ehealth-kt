@@ -308,6 +308,11 @@ public class SicctCommandInterpreter extends SimpleChannelInboundHandler<SicctMe
         if (p2 == (byte) 0x80) {
             return iccStatusDataObject(slotOf(msg));
         }
+        // CardTerminal Manufacturer Data Object, P2='46' (SICCT 5.5.10.6): manufacturer, SICCT and
+        // software versions plus the gemSpec_KT Discretionary Data DO (version fields), then SW 9000.
+        if (p2 == CardTerminalManufacturerInfo.P2_CARD_TERMINAL_MANUFACTURER) {
+            return Hex.concat(CardTerminalManufacturerInfo.dataObject(), StatusWord.SUCCESS.toBytes());
+        }
         // Other status objects: acknowledge with success (minimal functional response).
         return StatusWord.SUCCESS.toBytes();
     }

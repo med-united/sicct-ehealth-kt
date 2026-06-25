@@ -55,6 +55,30 @@ class GetStatusTest {
     }
 
     @Test
+    void getCardTerminalManufacturerReturnsCtmDoWithVersions() {
+        SimulatedCardSlotBackend backend = new SimulatedCardSlotBackend(3);
+        EmbeddedChannel channel = channelWith(new CardSlotManager(backend));
+
+        // GET STATUS, CT (FU 0), P2='46' -> CardTerminal Manufacturer Data Object.
+        byte[] apdu = {(byte) 0x80, 0x13, 0x00, (byte) 0x46, 0x00};
+        channel.writeInbound(SicctMessage.of(MessageType.COMMAND, (short) 0x0000, (short) 0x0003, apdu));
+        SicctMessage response = channel.readOutbound();
+
+        assertThat(response).isNotNull();
+        String body = Hex.toHex(response.getBody());
+        // Outer CTM DO: tag 46, len 44 (=68 bytes), then ... then SW 9000.
+        assertThat(body).startsWith("4644");
+        assertThat(body).endsWith("9000");
+        // CTM "DESRX" + CTT "0130 " + CTSV "0100 " (ASCII), then the DD DO (tag d7, len 33 = 51).
+        assertThat(body).contains(Hex.toHex("DESRX0130 0100 ".getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+        assertThat(body).contains("D733");
+        // VER = EHEALTH interface version 1.0.0 -> "  1  0  0" (each field space-left-padded to 3).
+        assertThat(body).contains(Hex.toHex("  1  0  0".getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+        // PT = "KT".
+        assertThat(body).contains(Hex.toHex("KT".getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+    }
+
+    @Test
     void getStatusForSingleAddressedIccReturnsThatSlotOnly() {
         SimulatedCardSlotBackend backend = new SimulatedCardSlotBackend(3);
         backend.simulatedSlot(2).insert(ScriptedVirtualCard.egk());
