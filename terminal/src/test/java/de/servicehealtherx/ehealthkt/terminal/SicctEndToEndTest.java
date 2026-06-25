@@ -139,8 +139,11 @@ class SicctEndToEndTest {
         String createData = "D410" + Hex.toHex(SHARED_SECRET) + "50" + Hex.toHex((byte) label.length) + Hex.toHex(label);
         String createApdu = "81AA0001" + Hex.toHex((byte) (createData.length() / 2)) + createData;
         SicctMessage createResp = roundTrip((short) 0, (short) 2, createApdu);
-        byte[] signature = createResp.getBody();
-        assertThat(signature).hasSize(256);
+        // Response APDU = 256-byte signature + SW 9000.
+        byte[] createBody = createResp.getBody();
+        assertThat(createBody).hasSize(258);
+        assertThat(Hex.toHex(createBody)).endsWith("9000");
+        byte[] signature = java.util.Arrays.copyOf(createBody, 256);
         assertThat(PairingSignatures.verify(serverPublicKey, SHARED_SECRET, signature)).isTrue();
 
         // 3) EHEALTH TERMINAL AUTHENTICATE VALIDATE: D5 10 <challenge>
@@ -149,7 +152,8 @@ class SicctEndToEndTest {
         String validateApdu = "81AA0002" + Hex.toHex((byte) (validateData.length() / 2)) + validateData;
         byte[] hashResp = roundTrip((short) 0, (short) 3, validateApdu).getBody();
         byte[] expected = MessageDigest.getInstance("SHA-256").digest(Hex.concat(challenge, SHARED_SECRET));
-        assertThat(hashResp).isEqualTo(expected);
+        // Response APDU = 32-byte SHA-256 hash + SW 9000.
+        assertThat(Hex.toHex(hashResp)).isEqualTo(Hex.toHex(expected) + "9000");
 
         // 4) REQUEST ICC for slot 2 (now paired) -> ATR + 9000
         byte[] requestIcc = roundTrip((short) 0, (short) 4, "801202F1").getBody();

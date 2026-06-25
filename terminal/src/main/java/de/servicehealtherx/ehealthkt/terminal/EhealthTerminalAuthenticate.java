@@ -86,7 +86,10 @@ public class EhealthTerminalAuthenticate {
         pairingStore.add(block);
         log.info("Paired with '{}' (key {}…)", label, clientPublicKeyHex.substring(0, Math.min(12, clientPublicKeyHex.length())));
 
-        return identity.signPairingSecret(secretTlv.value());
+        // Response APDU = <gSMC-KT signature over the shared secret> SW1 SW2, terminated by 9000
+        // like every ISO-7816 response so the Konnektor can split off the trailer (the data field
+        // before it is the signature).
+        return Hex.concat(identity.signPairingSecret(secretTlv.value()), StatusWord.SUCCESS.toBytes());
     }
 
     /** VALIDATE (P2=02). */
@@ -107,7 +110,12 @@ public class EhealthTerminalAuthenticate {
             log.warn("VALIDATE no pairing for key {}", clientPublicKeyHex);
             return StatusWord.COMMAND_NOT_ALLOWED.toBytes();
         }
-        return sharedSecretHash(challengeTlv.value(), block.get());
+        byte[] hash = sharedSecretHash(challengeTlv.value(), block.get());
+        if (hash == null) {
+            return StatusWord.COMMAND_NOT_ALLOWED.toBytes();
+        }
+        // Response APDU = <SHA-256(challenge || shared secret)> SW1 SW2, terminated by 9000.
+        return Hex.concat(hash, StatusWord.SUCCESS.toBytes());
     }
 
     /**
@@ -149,7 +157,7 @@ public class EhealthTerminalAuthenticate {
         PairingBlock match = null;
         for (PairingBlock block : pairingStore.all()) {
             byte[] hash = sharedSecretHash(challenge, block);
-            if (java.security.MessageDigest.isEqual(hash, expected)) {
+            if (hash != null && java.security.MessageDigest.isEqual(hash, expected)) {
                 if (match != null) {
                     log.warn("ADD Phase 2 hash matched more than one pairing block; rejecting");
                     return StatusWord.NO_INFORMATION.toBytes();
@@ -175,14 +183,18 @@ public class EhealthTerminalAuthenticate {
         return StatusWord.SUCCESS.toBytes();
     }
 
-    /** SHA-256(challenge || shared secret of {@code block}); a {@link StatusWord} on hash failure. */
+    /**
+     * SHA-256(challenge || shared secret of {@code block}), i.e. the raw 32-byte hash; {@code null}
+     * if the digest could not be computed. Callers append the response status word themselves
+     * (VALIDATE) or compare the hash directly (ADD Phase 2), so this returns the bare hash.
+     */
     private byte[] sharedSecretHash(byte[] challenge, PairingBlock block) {
         byte[] secret = Hex.toBytes(block.getSharedSecretHex());
         try {
             return MessageDigest.getInstance("SHA-256").digest(Hex.concat(challenge, secret));
         } catch (Exception e) {
             log.error("Could not compute shared secret hash", e);
-            return StatusWord.COMMAND_NOT_ALLOWED.toBytes();
+            return null;
         }
     }
 }

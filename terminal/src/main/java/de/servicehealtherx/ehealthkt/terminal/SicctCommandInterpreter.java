@@ -212,7 +212,8 @@ public class SicctCommandInterpreter extends SimpleChannelInboundHandler<SicctMe
                 } else {
                     ctx.attr(EXPECT_CHALLENGE).set(
                             new PendingChallenge(challenge, System.currentTimeMillis() + CHALLENGE_TTL_MILLIS));
-                    payload = challenge;
+                    // Response APDU = <challenge> SW1 SW2, terminated by 9000.
+                    payload = Hex.concat(challenge, StatusWord.SUCCESS.toBytes());
                 }
             }
             case 0x04 -> { // ADD Phase 2 — verify shared-secret knowledge, bind this Konnektor key
