@@ -25,13 +25,23 @@ import java.util.Date;
 
 /**
  * An in-memory gSMC-KT identity for hardware-free testing and the {@code sim} run mode.
- * Generates an RSA-2048 or EC brainpoolP256r1 key pair with a self-signed SM-KT certificate
- * and produces pairing signatures in the same byte format a real gSMC-KT would.
+ * Generates an RSA-2048 or EC key pair with a self-signed SM-KT certificate and produces
+ * pairing signatures in the same byte format a real gSMC-KT would (plain {@code r||s}, 64 bytes).
  *
- * <p>Note: a real Konnektor will reject this identity (no trusted gematik certificate chain);
- * it exists to exercise the pairing flow end-to-end in tests and demos.
+ * <p>The EC key uses {@code secp256r1} rather than the {@code brainpoolP256r1} a real gSMC-KT
+ * carries: brainpool curves are not negotiable over TLS 1.2 with the available JSSE providers
+ * (the JDK provider does not implement them, and BouncyCastle's JSSE disables the legacy TLS 1.2
+ * brainpool named groups), so a brainpool server certificate cannot complete an ECDHE-ECDSA
+ * handshake. {@code secp256r1} is in the supported-groups set advertised by Konnektors, so it
+ * negotiates cleanly. Both curves have a 32-byte field, so the pairing signature byte format is
+ * identical. This only affects the software stand-in; a real Konnektor rejects this identity
+ * anyway (no trusted gematik certificate chain). It exists to exercise the pairing flow
+ * end-to-end in tests and demos.
  */
 public class SoftwareTerminalIdentity implements TerminalIdentity {
+
+    /** TLS-negotiable curve for the software stand-in (a real gSMC-KT uses brainpoolP256r1). */
+    private static final String SOFTWARE_EC_CURVE = "secp256r1";
 
     static {
         if (java.security.Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
@@ -61,7 +71,7 @@ public class SoftwareTerminalIdentity implements TerminalIdentity {
             return g.generateKeyPair();
         }
         KeyPairGenerator g = KeyPairGenerator.getInstance("EC", BouncyCastleProvider.PROVIDER_NAME);
-        g.initialize(new ECNamedCurveGenParameterSpec(EcdsaSignatures.CURVE));
+        g.initialize(new ECNamedCurveGenParameterSpec(SOFTWARE_EC_CURVE));
         return g.generateKeyPair();
     }
 

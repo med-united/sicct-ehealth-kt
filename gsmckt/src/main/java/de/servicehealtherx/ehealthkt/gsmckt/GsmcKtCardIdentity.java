@@ -29,26 +29,39 @@ public class GsmcKtCardIdentity implements TerminalIdentity {
     private static final byte[] SELECT_DF_KT =
             {0x00, (byte) 0xa4, 0x04, 0x0c, 0x06, (byte) 0xd2, 0x76, 0x00, 0x01, 0x44, 0x00};
 
+    /** Short file identifier of EF.C.SMKT.AUT2 (ECC, brainpoolP256r1) within DF.KT. */
+    public static final byte SFI_C_SMKT_AUT2_EC = 0x04;
+    /** Short file identifier of EF.C.SMKT.AUT (RSA-2048) within DF.KT. */
+    public static final byte SFI_C_SMKT_AUT_RSA = 0x01;
+
     private final CardChannel channel;
     private final KeyType keyType;
     private final X509Certificate certificate;
+    private final X509Certificate ecCertificate;
+    private final X509Certificate rsaCertificate;
 
     public GsmcKtCardIdentity(CardChannel channel) {
         this.channel = channel;
-        // Prefer the ECC identity (EF.C.SMKT.AUT2, SFI 0x04); fall back to RSA (EF.C.SMKT.AUT, SFI 0x01).
-        X509Certificate ecCert = tryReadCertificate((byte) 0x04);
-        if (ecCert != null && ecCert.getPublicKey() instanceof ECPublicKey) {
-            this.certificate = ecCert;
+        // A gSMC-KT carries both an ECC (EF.C.SMKT.AUT2, SFI 0x04) and an RSA (EF.C.SMKT.AUT,
+        // SFI 0x01) authentication certificate. Read both so the TLS server can present either,
+        // but prefer the ECC identity for pairing (gematik ECC migration, A_17089-01).
+        this.ecCertificate = isEc(tryReadCertificate(SFI_C_SMKT_AUT2_EC));
+        this.rsaCertificate = tryReadCertificate(SFI_C_SMKT_AUT_RSA);
+        if (ecCertificate != null) {
+            this.certificate = ecCertificate;
             this.keyType = KeyType.EC;
-        } else {
-            X509Certificate rsaCert = tryReadCertificate((byte) 0x01);
-            if (rsaCert == null) {
-                throw new IllegalStateException("Could not read any SM-KT certificate from gSMC-KT");
-            }
-            this.certificate = rsaCert;
+        } else if (rsaCertificate != null) {
+            this.certificate = rsaCertificate;
             this.keyType = KeyType.RSA;
+        } else {
+            throw new IllegalStateException("Could not read any SM-KT certificate from gSMC-KT");
         }
-        log.info("gSMC-KT identity loaded: keyType={}, subject={}", keyType, certificate.getSubjectX500Principal());
+        log.info("gSMC-KT identity loaded: preferred keyType={}, EC cert={}, RSA cert={}, subject={}",
+                keyType, ecCertificate != null, rsaCertificate != null, certificate.getSubjectX500Principal());
+    }
+
+    private static X509Certificate isEc(X509Certificate cert) {
+        return cert != null && cert.getPublicKey() instanceof ECPublicKey ? cert : null;
     }
 
     private X509Certificate tryReadCertificate(byte sfi) {
@@ -84,6 +97,40 @@ public class GsmcKtCardIdentity implements TerminalIdentity {
     @Override
     public KeyType getKeyType() {
         return keyType;
+    }
+
+    /** The ECC SM-KT certificate (C.SMKT.AUT2, brainpoolP256r1), or {@code null} if the card has none. */
+    public X509Certificate getEcCertificate() {
+        return ecCertificate;
+    }
+
+    /** The RSA SM-KT certificate (C.SMKT.AUT, RSA-2048), or {@code null} if the card has none. */
+    public X509Certificate getRsaCertificate() {
+        return rsaCertificate;
+    }
+
+    /**
+     * ECDSA over a pre-computed 32-byte hash with PrK.SMKT.AUT.E256 (brainpoolP256r1); returns the
+     * plain {@code r||s} (64 bytes). Used by the TLS server to sign handshake data with the card.
+     */
+    public byte[] signEcdsa(byte[] hash) {
+        return pso(hash, (byte) 0x00, (byte) 0x06);
+    }
+
+    /**
+     * RSASSA-PKCS1-v1_5 with PrK.SMKT.AUT.R2048 over the supplied DigestInfo (algId 0x02,
+     * gemSpec_COS §signPKCS1_V1_5); returns 256 bytes. Used for TLS RSA cipher suites.
+     */
+    public byte[] signPkcs1(byte[] digestInfo) {
+        return pso(digestInfo, (byte) 0x02, (byte) 0x02);
+    }
+
+    /**
+     * RSASSA-PSS with PrK.SMKT.AUT.R2048 over a pre-computed hash (algId 0x05); returns 256 bytes.
+     * The card performs the EMSA-PSS encoding over the given hash.
+     */
+    public byte[] signPss(byte[] hash) {
+        return pso(hash, (byte) 0x05, (byte) 0x02);
     }
 
     @Override

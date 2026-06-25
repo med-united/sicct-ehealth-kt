@@ -15,6 +15,8 @@ import de.servicehealtherx.ehealthkt.terminal.SicctCommandInterpreter;
 import de.servicehealtherx.ehealthkt.terminal.SicctTlsServer;
 import de.servicehealtherx.ehealthkt.terminal.pairing.FilePairingStore;
 import de.servicehealtherx.ehealthkt.terminal.pairing.PairingStore;
+import de.servicehealtherx.ehealthkt.app.pki.GematikKonnektorTrust;
+import de.servicehealtherx.ehealthkt.app.pki.TslDownloader;
 import de.servicehealtherx.ehealthkt.ui.HeadlessUi;
 import de.servicehealtherx.ehealthkt.ui.TerminalUi;
 import io.netty.handler.ssl.SslContext;
@@ -49,8 +51,8 @@ public class EhealthKtApplication implements Callable<Integer> {
     @Option(names = "--port", description = "SICCT TLS port. Default: 4742")
     int port = SicctTlsServer.DEFAULT_PORT;
 
-    @Option(names = "--key-type", description = "SIM identity key type: ${COMPLETION-CANDIDATES}. Default: RSA")
-    KeyType keyType = KeyType.RSA;
+    @Option(names = "--key-type", description = "SIM identity key type: ${COMPLETION-CANDIDATES}. Default: EC")
+    KeyType keyType = KeyType.EC;
 
     @Option(names = "--ui", description = "User interface: ${COMPLETION-CANDIDATES}. Default: HEADLESS")
     UiKind uiKind = UiKind.HEADLESS;
@@ -69,6 +71,18 @@ public class EhealthKtApplication implements Callable<Integer> {
 
     @Option(names = "--gsmckt-reader", description = "PCSC mode: PC/SC reader index of the gSMC-KT. Default: 0")
     int gsmcktReader = 0;
+
+    @Option(names = "--tsl-production", description = "PCSC mode: use the production (PU) gematik TSL "
+            + "instead of the reference/test (RU) TSL. Default: false (use RU for TEST-ONLY cards).")
+    boolean tslProduction;
+
+    @Option(names = "--tsl-cache-dir", description = "PCSC mode: directory for the cached gematik TSL. "
+            + "Default: ./tsl-cache")
+    Path tslCacheDir = Path.of("tsl-cache");
+
+    @Option(names = "--no-konnektor-trust", description = "PCSC mode: skip gematik TUC_PKI_018 "
+            + "validation of the Konnektor client certificate (accept any chain). For local testing only.")
+    boolean noKonnektorTrust;
 
     @Option(names = "--terminal-name", description = "Terminal name announced via service discovery.")
     String terminalName = "eHealth-KT";
@@ -171,9 +185,20 @@ public class EhealthKtApplication implements Callable<Integer> {
         if (identity instanceof SoftwareTerminalIdentity sw) {
             return TlsContextFactory.forSoftwareIdentity(sw);
         }
-        throw new IllegalStateException(
-                "PCSC mode requires a gSMC-KT-backed TLS key manager, which is not yet wired. "
-                        + "Run with --mode SIM, or supply a server keystore (see README).");
+        if (identity instanceof GsmcKtCardIdentity card) {
+            javax.net.ssl.TrustManager konnektorTrust = null;
+            if (!noKonnektorTrust) {
+                log.info("Loading gematik {} TSL for Konnektor TUC_PKI_018 validation",
+                        tslProduction ? "production (PU)" : "reference/test (RU)");
+                TslDownloader tsl = new TslDownloader(tslProduction, tslCacheDir);
+                tsl.refresh();
+                konnektorTrust = GematikKonnektorTrust.clientTrustManager(tsl);
+            } else {
+                log.warn("Konnektor TUC_PKI_018 validation disabled (--no-konnektor-trust); accepting any client cert");
+            }
+            return TlsContextFactory.forCardIdentity(card, konnektorTrust);
+        }
+        throw new IllegalStateException("Unsupported terminal identity: " + identity.getClass().getName());
     }
 
     private static CardTerminal pcscReader(int index) {

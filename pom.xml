@@ -31,7 +31,7 @@
         <slf4j.version>2.0.18</slf4j.version>
         <logback.version>1.5.35</logback.version>
         <picocli.version>4.7.7</picocli.version>
-        <gemlibpki.version>2.1.7</gemlibpki.version>
+        <gemlibpki.version>4.0.2</gemlibpki.version>
         <jcardsim.version>3.0.5-6</jcardsim.version>
         <javafx.version>23.0.1</javafx.version>
 
@@ -235,6 +235,11 @@
         <repository>
             <id>jitpack.io</id>
             <url>https://jitpack.io</url>
+        </repository>
+        <repository>
+            <id>gematik-maven</id>
+            <name>Gematik Maven Repository</name>
+            <url>https://nexus.prod.ccs.gematik.solutions/repository/maven-releases/</url>
         </repository>
     </repositories>
 </project>
