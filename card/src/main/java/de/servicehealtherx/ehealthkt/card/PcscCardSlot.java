@@ -93,8 +93,10 @@ public class PcscCardSlot implements CardSlot {
         ensurePowered();
         try {
             return channel.transmit(new CommandAPDU(commandApdu)).getBytes();
+        } catch (IllegalStateException e) {
+            throw removalOrFail(e);
         } catch (CardException e) {
-            throw new IllegalStateException("APDU transmit failed on slot " + index, e);
+            throw removalOrFail(e);
         }
     }
 
@@ -115,9 +117,46 @@ public class PcscCardSlot implements CardSlot {
         try {
             int controlCode = featureControlCode();
             return card.transmitControlCommand(controlCode, PinBlocks.pinVerifyStructure(pinReference));
+        } catch (IllegalStateException e) {
+            throw removalOrFail(e);
         } catch (CardException e) {
-            throw new IllegalStateException("Secure PIN verify failed on slot " + index, e);
+            throw removalOrFail(e);
         }
+    }
+
+    /**
+     * Translate a failure from a card operation: if the card was removed mid-operation, drop the
+     * now-dead channel (so the next {@link #reset()} re-establishes one) and signal removal via a
+     * {@link CardRemovedException}; otherwise wrap it as a generic transmit failure.
+     */
+    private RuntimeException removalOrFail(Throwable cause) {
+        if (isRemoval(cause)) {
+            eject(); // clear the stale card/channel so a re-inserted card is reconnected on demand
+            return new CardRemovedException(index, cause);
+        }
+        if (cause instanceof RuntimeException re) {
+            return re; // e.g. the "No card powered" IllegalStateException from ensurePowered
+        }
+        return new IllegalStateException("Card operation failed on slot " + index, cause);
+    }
+
+    /**
+     * Whether the failure indicates the card was removed. Covers the JDK's
+     * {@code IllegalStateException("Card has been removed")} and the PC/SC
+     * {@code SCARD_W_REMOVED_CARD} / {@code SCARD_E_NO_SMARTCARD} status words.
+     */
+    private static boolean isRemoval(Throwable cause) {
+        for (Throwable t = cause; t != null; t = t.getCause()) {
+            String message = t.getMessage();
+            if (message != null) {
+                String lower = message.toLowerCase();
+                if (lower.contains("removed") || lower.contains("no_smartcard")
+                        || lower.contains("no smart card")) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     @Override

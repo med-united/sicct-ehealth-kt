@@ -90,6 +90,9 @@ public class EhealthKtApplication implements Callable<Integer> {
 
         SicctSessionRegistry sessions = new SicctSessionRegistry();
         CardPresenceMonitor cardMonitor = new CardPresenceMonitor(cards, sessions);
+        // Raise a CARD REMOVED event the instant a command detects the card was pulled, rather than
+        // waiting for the next presence poll.
+        cards.setRemovalListener(cardMonitor::cardRemoved);
 
         SicctTlsServer server = new SicctTlsServer(port, sslContext,
                 () -> new SicctCommandInterpreter(cards, ui, pairingStore, authenticate,

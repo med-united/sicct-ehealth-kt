@@ -1,5 +1,6 @@
 package de.servicehealtherx.ehealthkt.terminal;
 
+import de.servicehealtherx.ehealthkt.card.CardRemovedException;
 import de.servicehealtherx.ehealthkt.card.CardSlotManager;
 import de.servicehealtherx.ehealthkt.sicct.Hex;
 import de.servicehealtherx.ehealthkt.sicct.IccStatus;
@@ -124,6 +125,11 @@ public class SicctCommandInterpreter extends SimpleChannelInboundHandler<SicctMe
         } catch (NotPairedException e) {
             log.debug("Command rejected: not paired");
             reply(ctx, msg, StatusWord.COMMAND_NOT_ALLOWED_INVALID_CLIENT.toBytes());
+        } catch (CardRemovedException e) {
+            // The card was pulled mid-command: the CARD REMOVED event has already been raised and the
+            // dead channel dropped (recreated on demand). Answer this command with "ICC not present".
+            log.info("Card removed from slot {} during command; answered ICC not present", e.slot());
+            reply(ctx, msg, StatusWord.ICC_NOT_PRESENT.toBytes());
         } catch (Exception e) {
             log.warn("Error processing {}", msg, e);
             reply(ctx, msg, StatusWord.NO_INFORMATION.toBytes());

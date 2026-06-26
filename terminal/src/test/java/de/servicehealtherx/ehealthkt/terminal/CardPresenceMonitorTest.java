@@ -52,6 +52,33 @@ class CardPresenceMonitorTest {
     }
 
     @Test
+    void cardRemovedRaisesEventImmediatelyAndPollDoesNotDuplicateIt() {
+        SimulatedCardSlotBackend backend = new SimulatedCardSlotBackend(1);
+        backend.simulatedSlot(1).insert(ScriptedVirtualCard.egk());
+        CardSlotManager cards = new CardSlotManager(backend);
+        SicctSessionRegistry sessions = new SicctSessionRegistry();
+        EmbeddedChannel konnektor = new EmbeddedChannel();
+        sessions.register(konnektor);
+
+        CardPresenceMonitor monitor = new CardPresenceMonitor(cards, sessions, 0);
+        monitor.poll(); // baseline: card present in slot 1, no event
+        assertThat((SicctMessage) konnektor.readOutbound()).isNull();
+
+        // A command detects the card was pulled -> CARD REMOVED raised immediately.
+        backend.simulatedSlot(1).remove();
+        monitor.cardRemoved(1);
+        SicctMessage removed = konnektor.readOutbound();
+        assertThat(removed).isNotNull();
+        assertThat(removed.type()).isEqualTo(MessageType.EVENT);
+        assertThat(removed.getBody())
+                .isEqualTo(new byte[]{EventTag.CARD_REMOVED.value(), 0x02, 0x00, 0x01});
+
+        // The next presence poll sees the slot already known-absent -> no duplicate event.
+        monitor.poll();
+        assertThat((SicctMessage) konnektor.readOutbound()).isNull();
+    }
+
+    @Test
     void deliversEventsToEveryActiveSessionAndStopsAfterUnregister() {
         SimulatedCardSlotBackend backend = new SimulatedCardSlotBackend(1);
         CardSlotManager cards = new CardSlotManager(backend);

@@ -61,17 +61,34 @@ public class CardPresenceMonitor implements AutoCloseable {
     /** Poll once: detect insert/remove transitions since the last poll and broadcast the events. */
     void poll() {
         for (CardSlot slot : cards.slots()) {
-            int index = slot.index();
-            boolean present = slot.isPresent();
-            Boolean previous = presentBySlot.put(index, present);
-            if (previous == null || previous == present) {
-                continue; // first sighting (baseline) or no change
-            }
-            EventTag tag = present ? EventTag.CARD_INSERTED : EventTag.CARD_REMOVED;
-            log.info("Slot {}: card {} — notifying {} session(s)", index,
-                    present ? "inserted" : "removed", sessions.size());
-            sessions.broadcastCardEvent(tag, index);
+            transition(slot.index(), slot.isPresent());
         }
+    }
+
+    /**
+     * Report that a slot's card was found removed mid-operation (a card transmit failed with
+     * "Card has been removed"). Raises the SICCT CARD REMOVED event immediately rather than waiting
+     * for the next poll, and updates the baseline so the next poll does not emit a duplicate event.
+     * Wired as {@link de.servicehealtherx.ehealthkt.card.CardSlotManager}'s removal listener.
+     */
+    public void cardRemoved(int slot) {
+        transition(slot, false);
+    }
+
+    /**
+     * Apply a presence observation for one slot: broadcast a CARD INSERTED / CARD REMOVED event
+     * only on a genuine change from the last known state. Synchronized so the poll thread and the
+     * card-removal callback (a Netty event-loop thread) cannot race on {@link #presentBySlot}.
+     */
+    private synchronized void transition(int index, boolean present) {
+        Boolean previous = presentBySlot.put(index, present);
+        if (previous == null || previous == present) {
+            return; // first sighting (baseline) or no change
+        }
+        EventTag tag = present ? EventTag.CARD_INSERTED : EventTag.CARD_REMOVED;
+        log.info("Slot {}: card {} — notifying {} session(s)", index,
+                present ? "inserted" : "removed", sessions.size());
+        sessions.broadcastCardEvent(tag, index);
     }
 
     private void pollQuietly() {

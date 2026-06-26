@@ -13,9 +13,18 @@ import java.util.Optional;
 public class CardSlotManager implements AutoCloseable {
 
     private final CardSlotBackend backend;
+    private volatile CardRemovalListener removalListener = slot -> { };
 
     public CardSlotManager(CardSlotBackend backend) {
         this.backend = backend;
+    }
+
+    /**
+     * Register the listener notified when a slot detects mid-operation that its card was removed,
+     * so the terminal can raise a SICCT CARD REMOVED event immediately. Replaces any prior listener.
+     */
+    public void setRemovalListener(CardRemovalListener removalListener) {
+        this.removalListener = removalListener == null ? slot -> { } : removalListener;
     }
 
     public List<CardSlot> slots() {
@@ -51,7 +60,7 @@ public class CardSlotManager implements AutoCloseable {
 
     /** Transmit a command APDU to the addressed slot and return the response APDU. */
     public byte[] transmit(int slot, byte[] commandApdu) {
-        return require(slot).transmit(commandApdu);
+        return notifyingRemoval(slot, s -> s.transmit(commandApdu));
     }
 
     public boolean supportsSecurePinEntry(int slot) {
@@ -59,11 +68,25 @@ public class CardSlotManager implements AutoCloseable {
     }
 
     public byte[] verifyPinSecure(int slot, byte pinReference) {
-        return require(slot).verifyPinSecure(pinReference);
+        return notifyingRemoval(slot, s -> s.verifyPinSecure(pinReference));
     }
 
     public byte[] verifyPinPlain(int slot, byte pinReference, String pin) {
-        return require(slot).verifyPinPlain(pinReference, pin);
+        return notifyingRemoval(slot, s -> s.verifyPinPlain(pinReference, pin));
+    }
+
+    /**
+     * Run a card operation, translating a mid-operation card removal into a
+     * {@link CardRemovalListener#cardRemoved(int)} notification before rethrowing, so a SICCT
+     * CARD REMOVED event is raised at the moment the removal is detected.
+     */
+    private byte[] notifyingRemoval(int slot, java.util.function.Function<CardSlot, byte[]> op) {
+        try {
+            return op.apply(require(slot));
+        } catch (CardRemovedException e) {
+            removalListener.cardRemoved(e.slot());
+            throw e;
+        }
     }
 
     @Override

@@ -5,7 +5,11 @@ import de.servicehealtherx.ehealthkt.sicct.Hex;
 import de.servicehealtherx.ehealthkt.sicct.IccStatus;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class CardSlotManagerTest {
 
@@ -42,6 +46,75 @@ class CardSlotManagerTest {
 
         byte[] wrong = mgr.verifyPinPlain(1, (byte) 0x81, "000000");
         assertThat(Hex.toHex(wrong)).startsWith("63C");
+    }
+
+    @Test
+    void transmitNotifiesRemovalListenerWhenCardRemovedMidCommand() {
+        AtomicInteger removedSlot = new AtomicInteger(-1);
+        CardSlotManager mgr = new CardSlotManager(() -> List.of(new RemovedOnTransmitSlot(3)));
+        mgr.setRemovalListener(removedSlot::set);
+
+        assertThatThrownBy(() -> mgr.transmit(3, Hex.toBytes("00A4020C022F11")))
+                .isInstanceOf(CardRemovedException.class);
+        assertThat(removedSlot.get()).isEqualTo(3);
+    }
+
+    /** A slot that reports its card was pulled the moment a command is transmitted. */
+    private static final class RemovedOnTransmitSlot implements CardSlot {
+        private final int index;
+
+        RemovedOnTransmitSlot(int index) {
+            this.index = index;
+        }
+
+        @Override
+        public int index() {
+            return index;
+        }
+
+        @Override
+        public IccStatus status() {
+            return IccStatus.CC_ABSENT;
+        }
+
+        @Override
+        public boolean isPresent() {
+            return false;
+        }
+
+        @Override
+        public byte[] atr() {
+            return null;
+        }
+
+        @Override
+        public IccStatus reset() {
+            return IccStatus.CC_ABSENT;
+        }
+
+        @Override
+        public void eject() {
+        }
+
+        @Override
+        public byte[] transmit(byte[] commandApdu) {
+            throw new CardRemovedException(index, new IllegalStateException("Card has been removed"));
+        }
+
+        @Override
+        public boolean supportsSecurePinEntry() {
+            return false;
+        }
+
+        @Override
+        public byte[] verifyPinSecure(byte pinReference) {
+            return null;
+        }
+
+        @Override
+        public byte[] verifyPinPlain(byte pinReference, String pin) {
+            return transmit(null);
+        }
     }
 
     @Test
