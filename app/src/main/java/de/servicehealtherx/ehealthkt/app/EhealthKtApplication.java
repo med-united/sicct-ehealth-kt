@@ -13,6 +13,9 @@ import de.servicehealtherx.ehealthkt.terminal.pairing.FilePairingStore;
 import de.servicehealtherx.ehealthkt.terminal.pairing.PairingStore;
 import de.servicehealtherx.ehealthkt.app.pki.GematikKonnektorTrust;
 import de.servicehealtherx.ehealthkt.app.pki.TslDownloader;
+import de.servicehealtherx.ehealthkt.app.jmx.AuthenticatedJmxServer;
+import de.servicehealtherx.ehealthkt.app.jmx.EhealthKtManagement;
+import de.servicehealtherx.ehealthkt.app.jmx.JmxTerminalUi;
 import de.servicehealtherx.ehealthkt.ui.HeadlessUi;
 import de.servicehealtherx.ehealthkt.ui.TerminalUi;
 import io.netty.handler.ssl.SslContext;
@@ -28,6 +31,7 @@ import javax.smartcardio.TerminalFactory;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Entry point for the standalone eHealth-KT. The terminal runs against physical PC/SC readers: it
@@ -73,6 +77,24 @@ public class EhealthKtApplication implements Callable<Integer> {
     @Option(names = "--no-discovery", description = "Disable UDP service discovery.")
     boolean noDiscovery;
 
+    @Option(names = "--jmx", description = "Enable the JMX management interface (confirm pairing, "
+            + "enter PIN, connection state, gSMC-KT certificate). When enabled, pairing confirmations "
+            + "and host PIN entry are answered over JMX instead of by the local UI. Default: false.")
+    boolean jmx;
+
+    @Option(names = "--jmx-timeout", description = "Seconds to wait for a JMX confirmation/PIN before "
+            + "failing safe (deny/cancel). Default: 120")
+    int jmxTimeout = 120;
+
+    @Option(names = "--jmx-remote-port", description = "Enable an authenticated remote JMX connector "
+            + "(RMI) on this port with CT_ADMIN/CT_CONTROL role-based access. Requires --jmx and "
+            + "--jmx-users-file. Default: 0 (disabled; local JMX only).")
+    int jmxRemotePort;
+
+    @Option(names = "--jmx-users-file", description = "Properties file of JMX accounts for remote "
+            + "access: 'user = password, ROLE[, ROLE]' (roles: CT_ADMIN, CT_CONTROL).")
+    Path jmxUsersFile;
+
     @Option(names = "--reader-idle", description = "Reader idle timeout (s). Default: 119")
     int readerIdle = 119;
 
@@ -83,7 +105,10 @@ public class EhealthKtApplication implements Callable<Integer> {
     public Integer call() throws Exception {
         GsmcKtCardIdentity identity = discoverGsmcKt();
         CardSlotManager cards = new CardSlotManager(new PcscCardSlotBackend());
-        TerminalUi ui = buildUi();
+        // When JMX management is enabled, route pairing confirmations and host PIN entry through the
+        // JMX bridge UI; otherwise keep the local UI (headless auto-confirm / JavaFX).
+        JmxTerminalUi jmxUi = jmx ? new JmxTerminalUi(buildUi(), jmxTimeout * 1000L) : null;
+        TerminalUi ui = jmxUi != null ? jmxUi : buildUi();
         PairingStore pairingStore = new FilePairingStore(pairingFile);
         EhealthTerminalAuthenticate authenticate = new EhealthTerminalAuthenticate(identity, pairingStore, ui);
         SslContext sslContext = buildSslContext(identity);
@@ -101,22 +126,28 @@ public class EhealthKtApplication implements Callable<Integer> {
 
         ServiceDiscoveryServer discovery = noDiscovery ? null : new ServiceDiscoveryServer(port, terminalName);
         FirmwareUpdateService firmware = FirmwareUpdateService.noop();
-        ManagementInterface management = ManagementInterface.noop();
 
         int boundPort = server.start();
         if (discovery != null) {
             discovery.start();
         }
-        management.start();
-        firmware.checkForUpdate();
-        ui.display(terminalName, "Ready :" + boundPort);
 
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+        AuthenticatedJmxServer jmxServer = buildAuthenticatedJmx();
+
+        // Tear down everything that holds the SICCT port, the JMX port or a PC/SC reader. Shared by
+        // the JVM shutdown hook and the JMX restart (which releases these before relaunching).
+        AtomicBoolean tornDown = new AtomicBoolean();
+        Runnable teardown = () -> {
+            if (!tornDown.compareAndSet(false, true)) {
+                return;
+            }
             log.info("Shutting down eHealth-KT");
+            if (jmxServer != null) {
+                jmxServer.stop();
+            }
             if (discovery != null) {
                 discovery.close();
             }
-            management.stop();
             server.close();
             cardMonitor.close();
             try {
@@ -124,6 +155,23 @@ public class EhealthKtApplication implements Callable<Integer> {
             } catch (Exception ignored) {
                 // best effort
             }
+        };
+
+        ManagementInterface management = jmxUi != null
+                ? new EhealthKtManagement(boundPort, sessions, pairingStore, identity, jmxUi,
+                        new ProcessRestarter(teardown))
+                : ManagementInterface.noop();
+        management.start();
+        if (jmxServer != null) {
+            jmxServer.start();
+            log.info("Authenticated remote JMX (CT_ADMIN/CT_CONTROL) enabled on port {}", jmxRemotePort);
+        }
+        firmware.checkForUpdate();
+        ui.display(terminalName, "Ready :" + boundPort);
+
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            teardown.run();
+            management.stop();
         }));
 
         log.info("eHealth-KT '{}' running on port {} ({} UI). Press Ctrl+C to stop.",
@@ -162,6 +210,24 @@ public class EhealthKtApplication implements Callable<Integer> {
         }
         throw new IllegalStateException("No gSMC-KT found in any of the " + readers.size()
                 + " connected PC/SC reader(s)");
+    }
+
+    /**
+     * Build the authenticated remote JMX connector when {@code --jmx-remote-port} is set, or return
+     * {@code null} to keep JMX local-only. Requires {@code --jmx} (so the management bean exists) and
+     * a {@code --jmx-users-file}.
+     */
+    private AuthenticatedJmxServer buildAuthenticatedJmx() {
+        if (jmxRemotePort <= 0) {
+            return null;
+        }
+        if (!jmx) {
+            throw new IllegalArgumentException("--jmx-remote-port requires --jmx");
+        }
+        if (jmxUsersFile == null) {
+            throw new IllegalArgumentException("--jmx-remote-port requires --jmx-users-file");
+        }
+        return AuthenticatedJmxServer.fromUsersFile(jmxRemotePort, jmxUsersFile);
     }
 
     private TerminalUi buildUi() {

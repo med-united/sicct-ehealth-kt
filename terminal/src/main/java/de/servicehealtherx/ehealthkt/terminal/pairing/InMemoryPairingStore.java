@@ -25,4 +25,14 @@ public class InMemoryPairingStore implements PairingStore {
     public List<PairingBlock> all() {
         return List.copyOf(blocks);
     }
+
+    @Override
+    public boolean remove(PairingBlock block) {
+        return blocks.remove(block);
+    }
+
+    @Override
+    public void clear() {
+        blocks.clear();
+    }
 }

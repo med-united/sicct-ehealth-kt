@@ -21,6 +21,15 @@ public interface PairingStore {
      */
     List<PairingBlock> all();
 
+    /** Remove a single pairing block. Returns {@code true} if it was present. */
+    default boolean remove(PairingBlock block) {
+        return false;
+    }
+
+    /** Remove all pairing blocks (e.g. on a factory reset). */
+    default void clear() {
+    }
+
     /**
      * Persist mutations made in place to a block returned by {@link #all()} or
      * {@link #findByPublicKey}. Equivalent to {@link #flush()}; named for intent at call sites.

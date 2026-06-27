@@ -45,6 +45,21 @@ public class FilePairingStore extends InMemoryPairingStore {
     }
 
     @Override
+    public boolean remove(PairingBlock block) {
+        boolean removed = super.remove(block);
+        if (removed) {
+            flush();
+        }
+        return removed;
+    }
+
+    @Override
+    public void clear() {
+        super.clear();
+        flush();
+    }
+
+    @Override
     public synchronized void flush() {
         try {
             if (file.getParent() != null) {
