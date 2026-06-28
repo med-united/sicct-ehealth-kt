@@ -35,7 +35,7 @@ public class PcscCardSlotBackend implements CardSlotBackend {
     private final Set<String> excludedReaderNames;
     private final Map<String, CardSlot> slotsByReaderName = new LinkedHashMap<>();
     private final ScheduledExecutorService scanner;
-    private int nextIndex = 1;
+    private int nextIndex;
 
     public PcscCardSlotBackend() {
         this(Set.of());
@@ -43,13 +43,22 @@ public class PcscCardSlotBackend implements CardSlotBackend {
 
     /**
      * @param excludedReaderNames readers that must never become a card slot — above all the reader
-     *        holding the terminal's own gSMC-KT, whose card backs the SICCT TLS identity. Binding it
-     *        as a card slot lets card discovery transmit to that card concurrently with TLS signing,
-     *        corrupting the TLS session (the Konnektor sees {@code internal_error} and the connection
-     *        drops mid-operation).
+     *        holding the terminal's own gSMC-KT, whose card backs the SICCT TLS identity. That card
+     *        is instead exposed as a card slot sharing the identity's channel (see
+     *        {@link GsmcKtCardSlot}); binding it here as a <em>second</em> PC/SC connection would let
+     *        card discovery transmit to it concurrently with TLS signing, corrupting the session.
      */
     public PcscCardSlotBackend(Set<String> excludedReaderNames) {
-        this(defaultReaderSource(), DEFAULT_RESCAN_INTERVAL_MS, excludedReaderNames);
+        this(excludedReaderNames, 1);
+    }
+
+    /**
+     * @param excludedReaderNames readers never bound as a card slot (see {@link #PcscCardSlotBackend(Set)})
+     * @param startIndex          1-based index of the first bound reader; use {@code > 1} when other
+     *        slots (e.g. the gSMC-KT at slot 1) precede the PC/SC readers in the terminal's slot list
+     */
+    public PcscCardSlotBackend(Set<String> excludedReaderNames, int startIndex) {
+        this(defaultReaderSource(), DEFAULT_RESCAN_INTERVAL_MS, excludedReaderNames, startIndex);
     }
 
     /**
@@ -62,8 +71,14 @@ public class PcscCardSlotBackend implements CardSlotBackend {
 
     PcscCardSlotBackend(Supplier<List<CardTerminal>> readerSource, long rescanIntervalMs,
             Set<String> excludedReaderNames) {
+        this(readerSource, rescanIntervalMs, excludedReaderNames, 1);
+    }
+
+    PcscCardSlotBackend(Supplier<List<CardTerminal>> readerSource, long rescanIntervalMs,
+            Set<String> excludedReaderNames, int startIndex) {
         this.readerSource = readerSource;
         this.excludedReaderNames = Set.copyOf(excludedReaderNames);
+        this.nextIndex = startIndex;
         rescan();
         if (slots().isEmpty()) {
             log.warn("No PC/SC readers connected yet; will keep scanning for newly connected readers");

@@ -1,6 +1,10 @@
 package de.servicehealtherx.ehealthkt.app;
 
+import de.servicehealtherx.ehealthkt.card.CardSlot;
+import de.servicehealtherx.ehealthkt.card.CardSlotBackend;
 import de.servicehealtherx.ehealthkt.card.CardSlotManager;
+import de.servicehealtherx.ehealthkt.card.CompositeCardSlotBackend;
+import de.servicehealtherx.ehealthkt.card.GsmcKtCardSlot;
 import de.servicehealtherx.ehealthkt.card.PcscCardSlotBackend;
 import de.servicehealtherx.ehealthkt.gsmckt.GsmcKtCardIdentity;
 import de.servicehealtherx.ehealthkt.terminal.CardPresenceMonitor;
@@ -105,11 +109,16 @@ public class EhealthKtApplication implements Callable<Integer> {
     public Integer call() throws Exception {
         DiscoveredGsmcKt gsmcKt = discoverGsmcKt();
         GsmcKtCardIdentity identity = gsmcKt.identity();
-        // Exclude the gSMC-KT's own reader from the card slots: its card backs the SICCT TLS identity,
-        // and binding it as a card slot lets card discovery transmit to it concurrently with TLS
-        // signing, corrupting the session (Konnektor sees internal_error → connection drops).
+        // Expose the gSMC-KT as slot 1 (real-terminal convention) sharing the TLS identity's card
+        // channel, and bind the genuine card readers from slot 2 onward. The gSMC-KT's own reader is
+        // excluded from the PC/SC backend so it is not opened a SECOND time: a separate connection
+        // issuing card APDUs concurrently with TLS signing corrupts the card's T=1 exchange (the
+        // Konnektor then sees a TLS internal_error and the connection drops mid-operation). The slot
+        // forwards APDUs through identity.transmitApdu, which is serialised against TLS/pairing signing.
+        CardSlot gsmcKtSlot = new GsmcKtCardSlot(1, identity.atr(), identity::transmitApdu);
+        CardSlotBackend cardReaders = new PcscCardSlotBackend(java.util.Set.of(gsmcKt.readerName()), 2);
         CardSlotManager cards = new CardSlotManager(
-                new PcscCardSlotBackend(java.util.Set.of(gsmcKt.readerName())));
+                new CompositeCardSlotBackend(java.util.List.of(gsmcKtSlot), cardReaders));
         // When JMX management is enabled, route pairing confirmations and host PIN entry through the
         // JMX bridge UI; otherwise keep the local UI (headless auto-confirm / JavaFX).
         JmxTerminalUi jmxUi = jmx ? new JmxTerminalUi(buildUi(), jmxTimeout * 1000L) : null;

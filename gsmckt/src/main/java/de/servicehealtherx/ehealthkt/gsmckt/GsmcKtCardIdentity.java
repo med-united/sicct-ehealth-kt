@@ -150,7 +150,7 @@ public class GsmcKtCardIdentity implements TerminalIdentity {
      * so the EHEALTH TERMINAL AUTHENTICATE (ADD Phase 1) flow never breaks on RNG availability.
      */
     @Override
-    public byte[] randomBytes(int length) {
+    public synchronized byte[] randomBytes(int length) {
         try {
             byte[] getChallenge = {0x00, (byte) 0x84, 0x00, 0x00, (byte) length};
             byte[] random = transmit("GET CHALLENGE", getChallenge, false);
@@ -165,7 +165,34 @@ public class GsmcKtCardIdentity implements TerminalIdentity {
         return TerminalIdentity.super.randomBytes(length);
     }
 
-    private byte[] pso(byte[] message, byte algId, byte keyRef) {
+    /**
+     * The ATR of the gSMC-KT card, or {@code null} if unavailable — used to present the card as a
+     * SICCT card slot.
+     */
+    public byte[] atr() {
+        try {
+            return channel.getCard().getATR().getBytes();
+        } catch (RuntimeException e) {
+            log.debug("Could not read gSMC-KT ATR", e);
+            return null;
+        }
+    }
+
+    /**
+     * Transmit a raw command APDU to the gSMC-KT and return the raw response APDU (data + SW), for
+     * exposing the card as a SICCT slot. {@code synchronized} (like the signing operations) so a
+     * slot APDU never interleaves with TLS/pairing signing on the shared channel — concurrent access
+     * on two halves of one card would corrupt its T=1 exchange.
+     */
+    public synchronized byte[] transmitApdu(byte[] command) {
+        try {
+            return channel.transmit(new CommandAPDU(command)).getBytes();
+        } catch (CardException e) {
+            throw new IllegalStateException("gSMC-KT card APDU transmit failed", e);
+        }
+    }
+
+    private synchronized byte[] pso(byte[] message, byte algId, byte keyRef) {
         transmit("SELECT DF.KT", SELECT_DF_KT, false);
         // MSE: select private key + algorithm
         byte[] mse = {0x00, 0x22, 0x41, (byte) 0xB6, 0x06,
