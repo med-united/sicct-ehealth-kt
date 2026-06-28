@@ -103,8 +103,13 @@ public class EhealthKtApplication implements Callable<Integer> {
 
     @Override
     public Integer call() throws Exception {
-        GsmcKtCardIdentity identity = discoverGsmcKt();
-        CardSlotManager cards = new CardSlotManager(new PcscCardSlotBackend());
+        DiscoveredGsmcKt gsmcKt = discoverGsmcKt();
+        GsmcKtCardIdentity identity = gsmcKt.identity();
+        // Exclude the gSMC-KT's own reader from the card slots: its card backs the SICCT TLS identity,
+        // and binding it as a card slot lets card discovery transmit to it concurrently with TLS
+        // signing, corrupting the session (Konnektor sees internal_error → connection drops).
+        CardSlotManager cards = new CardSlotManager(
+                new PcscCardSlotBackend(java.util.Set.of(gsmcKt.readerName())));
         // When JMX management is enabled, route pairing confirmations and host PIN entry through the
         // JMX bridge UI; otherwise keep the local UI (headless auto-confirm / JavaFX).
         JmxTerminalUi jmxUi = jmx ? new JmxTerminalUi(buildUi(), jmxTimeout * 1000L) : null;
@@ -184,7 +189,7 @@ public class EhealthKtApplication implements Callable<Integer> {
      * Scan every connected PC/SC reader for a gSMC-KT and return the first usable one. Empty readers,
      * and readers holding a card that is not a gSMC-KT, are skipped — an empty reader is normal.
      */
-    private GsmcKtCardIdentity discoverGsmcKt() {
+    private DiscoveredGsmcKt discoverGsmcKt() {
         List<CardTerminal> readers;
         try {
             readers = TerminalFactory.getDefault().terminals().list();
@@ -203,7 +208,7 @@ public class EhealthKtApplication implements Callable<Integer> {
                 GsmcKtCardIdentity identity =
                         new GsmcKtCardIdentity(reader.connect("*").getBasicChannel());
                 log.info("Using gSMC-KT in PC/SC reader '{}'", reader.getName());
-                return identity;
+                return new DiscoveredGsmcKt(identity, reader.getName());
             } catch (Exception e) {
                 log.debug("Reader '{}' does not hold a usable gSMC-KT: {}", reader.getName(), e.toString());
             }
@@ -211,6 +216,9 @@ public class EhealthKtApplication implements Callable<Integer> {
         throw new IllegalStateException("No gSMC-KT found in any of the " + readers.size()
                 + " connected PC/SC reader(s)");
     }
+
+    /** The discovered gSMC-KT identity together with the name of the PC/SC reader holding it. */
+    private record DiscoveredGsmcKt(GsmcKtCardIdentity identity, String readerName) {}
 
     /**
      * Build the authenticated remote JMX connector when {@code --jmx-remote-port} is set, or return

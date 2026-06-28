@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -31,12 +32,24 @@ public class PcscCardSlotBackend implements CardSlotBackend {
     public static final long DEFAULT_RESCAN_INTERVAL_MS = 2_000;
 
     private final Supplier<List<CardTerminal>> readerSource;
+    private final Set<String> excludedReaderNames;
     private final Map<String, CardSlot> slotsByReaderName = new LinkedHashMap<>();
     private final ScheduledExecutorService scanner;
     private int nextIndex = 1;
 
     public PcscCardSlotBackend() {
-        this(defaultReaderSource(), DEFAULT_RESCAN_INTERVAL_MS);
+        this(Set.of());
+    }
+
+    /**
+     * @param excludedReaderNames readers that must never become a card slot — above all the reader
+     *        holding the terminal's own gSMC-KT, whose card backs the SICCT TLS identity. Binding it
+     *        as a card slot lets card discovery transmit to that card concurrently with TLS signing,
+     *        corrupting the TLS session (the Konnektor sees {@code internal_error} and the connection
+     *        drops mid-operation).
+     */
+    public PcscCardSlotBackend(Set<String> excludedReaderNames) {
+        this(defaultReaderSource(), DEFAULT_RESCAN_INTERVAL_MS, excludedReaderNames);
     }
 
     /**
@@ -44,7 +57,13 @@ public class PcscCardSlotBackend implements CardSlotBackend {
      * @param rescanIntervalMs  re-enumeration period; {@code <= 0} disables the background scan
      */
     PcscCardSlotBackend(Supplier<List<CardTerminal>> readerSource, long rescanIntervalMs) {
+        this(readerSource, rescanIntervalMs, Set.of());
+    }
+
+    PcscCardSlotBackend(Supplier<List<CardTerminal>> readerSource, long rescanIntervalMs,
+            Set<String> excludedReaderNames) {
         this.readerSource = readerSource;
+        this.excludedReaderNames = Set.copyOf(excludedReaderNames);
         rescan();
         if (slots().isEmpty()) {
             log.warn("No PC/SC readers connected yet; will keep scanning for newly connected readers");
@@ -71,6 +90,9 @@ public class PcscCardSlotBackend implements CardSlotBackend {
     private synchronized void rescan() {
         for (CardTerminal terminal : readerSource.get()) {
             String name = terminal.getName();
+            if (excludedReaderNames.contains(name)) {
+                continue; // never bind the gSMC-KT's own reader as a card slot (see constructor)
+            }
             if (!slotsByReaderName.containsKey(name)) {
                 int index = nextIndex++;
                 slotsByReaderName.put(name, new PcscCardSlot(index, terminal));
