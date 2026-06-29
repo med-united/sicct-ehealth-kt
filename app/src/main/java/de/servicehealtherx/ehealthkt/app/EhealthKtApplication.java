@@ -214,8 +214,10 @@ public class EhealthKtApplication implements Callable<Integer> {
                     log.debug("Reader '{}' is empty, skipping gSMC-KT probe", reader.getName());
                     continue;
                 }
-                GsmcKtCardIdentity identity =
-                        new GsmcKtCardIdentity(reader.connect("*").getBasicChannel());
+                // Pass the reader (not just the channel) so the identity can transparently re-open the
+                // channel if the gSMC-KT is later removed or idle-resets (the card powers down when
+                // untouched), instead of failing every TLS signature once the handle goes stale.
+                GsmcKtCardIdentity identity = new GsmcKtCardIdentity(reader);
                 log.info("Using gSMC-KT in PC/SC reader '{}'", reader.getName());
                 return new DiscoveredGsmcKt(identity, reader.getName());
             } catch (Exception e) {

@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 
 import javax.smartcardio.CardChannel;
 import javax.smartcardio.CardException;
+import javax.smartcardio.CardTerminal;
 import javax.smartcardio.CommandAPDU;
 import javax.smartcardio.ResponseAPDU;
 import java.io.ByteArrayInputStream;
@@ -13,6 +14,7 @@ import java.security.PublicKey;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.interfaces.ECPublicKey;
+import java.util.function.Supplier;
 
 /**
  * A gSMC-KT terminal identity backed by a real card in a PC/SC reader. Ported from the
@@ -34,14 +36,43 @@ public class GsmcKtCardIdentity implements TerminalIdentity {
     /** Short file identifier of EF.C.SMKT.AUT (RSA-2048) within DF.KT. */
     public static final byte SFI_C_SMKT_AUT_RSA = 0x01;
 
-    private final CardChannel channel;
+    /** How long to wait for the gSMC-KT to reappear in its reader after it was removed/reset. */
+    private static final long RECONNECT_WAIT_MS = 5_000;
+
+    /**
+     * The PC/SC reader the card lives in, used to transparently re-open the channel when the card is
+     * removed or idle-reset. {@code null} when the identity was bound to a bare channel (the hardware
+     * integration test): in that case no automatic reconnect is attempted.
+     */
+    private final CardTerminal reader;
+    /** Re-established by {@link #reconnect()}; read fresh on every transmit so retries use the new card. */
+    private volatile CardChannel channel;
     private final KeyType keyType;
     private final X509Certificate certificate;
     private final X509Certificate ecCertificate;
     private final X509Certificate rsaCertificate;
 
+    /**
+     * Bind to an already-open card channel. Used by the hardware integration test; does <b>not</b>
+     * reconnect automatically if the card is later removed (no reader reference is available).
+     */
     public GsmcKtCardIdentity(CardChannel channel) {
+        this(channel, null);
+    }
+
+    /**
+     * Bind to the gSMC-KT in the given PC/SC reader, opening the channel now. If the card is later
+     * removed or idle-reset (the gematik gSMC-KT powers down when untouched), signing and slot APDUs
+     * transparently re-open the channel and retry once, so the TLS identity survives the card going
+     * away and coming back without restarting the terminal.
+     */
+    public GsmcKtCardIdentity(CardTerminal reader) throws CardException {
+        this(reader.connect("*").getBasicChannel(), reader);
+    }
+
+    private GsmcKtCardIdentity(CardChannel channel, CardTerminal reader) {
         this.channel = channel;
+        this.reader = reader;
         // A gSMC-KT carries both an ECC (EF.C.SMKT.AUT2, SFI 0x04) and an RSA (EF.C.SMKT.AUT,
         // SFI 0x01) authentication certificate. Read both so the TLS server can present either,
         // but prefer the ECC identity for pairing (gematik ECC migration, A_17089-01).
@@ -153,7 +184,8 @@ public class GsmcKtCardIdentity implements TerminalIdentity {
     public synchronized byte[] randomBytes(int length) {
         try {
             byte[] getChallenge = {0x00, (byte) 0x84, 0x00, 0x00, (byte) length};
-            byte[] random = transmit("GET CHALLENGE", getChallenge, false);
+            byte[] random = withReconnect("GET CHALLENGE",
+                    () -> transmit("GET CHALLENGE", getChallenge, false));
             if (random != null && random.length == length) {
                 return random;
             }
@@ -185,30 +217,123 @@ public class GsmcKtCardIdentity implements TerminalIdentity {
      * on two halves of one card would corrupt its T=1 exchange.
      */
     public synchronized byte[] transmitApdu(byte[] command) {
-        try {
-            return channel.transmit(new CommandAPDU(command)).getBytes();
-        } catch (CardException e) {
-            throw new IllegalStateException("gSMC-KT card APDU transmit failed", e);
-        }
+        return withReconnect("card APDU", () -> {
+            try {
+                return channel.transmit(new CommandAPDU(command)).getBytes();
+            } catch (CardException e) {
+                throw new IllegalStateException("gSMC-KT card APDU transmit failed", e);
+            }
+        });
     }
 
     private synchronized byte[] pso(byte[] message, byte algId, byte keyRef) {
-        transmit("SELECT DF.KT", SELECT_DF_KT, false);
-        // MSE: select private key + algorithm
-        byte[] mse = {0x00, 0x22, 0x41, (byte) 0xB6, 0x06,
-                (byte) 0x84, 0x01, (byte) (0x80 | keyRef), (byte) 0x80, 0x01, algId};
-        transmit("MSE", mse, false);
+        // Run the whole SELECT/MSE/PSO sequence under one reconnect guard: if the card was removed or
+        // idle-reset, retrying only the failing APDU would lose the security state set up by the
+        // preceding MSE, so the entire sequence must be replayed on the fresh channel.
+        return withReconnect("PSO Compute Digital Signature", () -> {
+            transmit("SELECT DF.KT", SELECT_DF_KT, false);
+            // MSE: select private key + algorithm
+            byte[] mse = {0x00, 0x22, 0x41, (byte) 0xB6, 0x06,
+                    (byte) 0x84, 0x01, (byte) (0x80 | keyRef), (byte) 0x80, 0x01, algId};
+            transmit("MSE", mse, false);
 
-        // PSO Compute Digital Signature, extended length
-        ByteArrayOutputStream apdu = new ByteArrayOutputStream();
-        apdu.writeBytes(new byte[]{0x00, 0x2a, (byte) 0x9e, (byte) 0x9a});
-        apdu.write(0x00); // extended length marker
-        apdu.write((message.length >> 8) & 0xFF);
-        apdu.write(message.length & 0xFF);
-        apdu.writeBytes(message);
-        apdu.write(0x00); // Le
-        apdu.write(0x00);
-        return transmit("PSO Compute Digital Signature", apdu.toByteArray(), false);
+            // PSO Compute Digital Signature, extended length
+            ByteArrayOutputStream apdu = new ByteArrayOutputStream();
+            apdu.writeBytes(new byte[]{0x00, 0x2a, (byte) 0x9e, (byte) 0x9a});
+            apdu.write(0x00); // extended length marker
+            apdu.write((message.length >> 8) & 0xFF);
+            apdu.write(message.length & 0xFF);
+            apdu.writeBytes(message);
+            apdu.write(0x00); // Le
+            apdu.write(0x00);
+            return transmit("PSO Compute Digital Signature", apdu.toByteArray(), false);
+        });
+    }
+
+    /**
+     * Run a card operation; if it fails because the card was removed or idle-reset, transparently
+     * re-open the channel (re-discovering the gSMC-KT in its reader) and retry the whole operation
+     * once. Only attempted when a {@link #reader} is known; other failures propagate unchanged.
+     */
+    private <T> T withReconnect(String action, Supplier<T> op) {
+        try {
+            return op.get();
+        } catch (RuntimeException e) {
+            if (reader == null || !isCardRemoved(e)) {
+                throw e;
+            }
+            log.warn("gSMC-KT lost during {} ({}); reconnecting to reader '{}' and retrying once",
+                    action, rootMessage(e), safeReaderName());
+            reconnect();
+            return op.get();
+        }
+    }
+
+    /**
+     * Re-open the card channel after the gSMC-KT was removed or reset. Drops the stale handle, waits
+     * briefly for a card to be present in the reader (the card may be mid-reinsertion), then connects
+     * afresh. The cached certificates are intentionally <b>not</b> re-read so the TLS identity stays
+     * stable across the reconnect.
+     */
+    private synchronized void reconnect() {
+        // Drop the dead handle so PC/SC releases the card before we re-power it; best effort.
+        try {
+            channel.getCard().disconnect(false);
+        } catch (Exception ignored) {
+            // the card may already be gone
+        }
+        try {
+            if (!reader.isCardPresent()) {
+                log.info("Waiting up to {} ms for the gSMC-KT to reappear in reader '{}'",
+                        RECONNECT_WAIT_MS, safeReaderName());
+                reader.waitForCardPresent(RECONNECT_WAIT_MS);
+            }
+            this.channel = reader.connect("*").getBasicChannel();
+            log.info("Reconnected to gSMC-KT in reader '{}'", safeReaderName());
+        } catch (CardException e) {
+            throw new IllegalStateException(
+                    "Failed to reconnect to gSMC-KT in reader '" + safeReaderName() + "'", e);
+        }
+    }
+
+    /**
+     * Whether a failure means the card went away — removed, reset (the gSMC-KT powers down when idle)
+     * or otherwise no longer transacting — so that re-opening the channel can recover it. Walks the
+     * cause chain because the trigger surfaces either as a bare {@code IllegalStateException} from
+     * {@code CardChannel.transmit} or as a wrapped PC/SC {@link CardException}.
+     */
+    private static boolean isCardRemoved(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            String m = c.getMessage();
+            if (m == null) {
+                continue;
+            }
+            if (m.contains("Card has been removed")
+                    || m.contains("SCARD_W_REMOVED_CARD")
+                    || m.contains("SCARD_W_RESET_CARD")
+                    || m.contains("SCARD_W_UNPOWERED_CARD")
+                    || m.contains("SCARD_E_NO_SMARTCARD")
+                    || m.contains("SCARD_E_NOT_TRANSACTED")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String rootMessage(Throwable t) {
+        Throwable c = t;
+        while (c.getCause() != null) {
+            c = c.getCause();
+        }
+        return c.getMessage() != null ? c.getMessage() : c.getClass().getSimpleName();
+    }
+
+    private String safeReaderName() {
+        try {
+            return reader.getName();
+        } catch (RuntimeException e) {
+            return "<unknown>";
+        }
     }
 
     private byte[] transmit(String action, byte[] command, boolean allowNon9000) {
