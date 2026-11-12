@@ -19,8 +19,9 @@ public interface TerminalUi extends AutoCloseable {
     }
 
     /**
-     * Prompt the user to enter a PIN on the host. Returns the entered digits, or {@code null}
-     * if the user cancelled or timed out. The caller must zero the array after use.
+     * Prompt the user to enter a PIN on the terminal. Returns the entered digits, {@code null} if
+     * no PIN was entered in time, or an empty array if the user cancelled the entry. The caller
+     * must zero the array after use.
      */
     char[] requestPin(PinRequest request);
 

@@ -18,6 +18,11 @@ public enum StatusWord {
     INSTRUCTION_NOT_SUPPORTED(0x6D00, "Instruction not supported / wrong instruction"),
     CLASS_NOT_SUPPORTED(0x6E00, "Class not supported"),
     COMMAND_TIMEOUT(0x6401, "Command timeout"),
+    INPUT_TIMEOUT(0x6400, "No or incomplete input in time"),
+    INPUT_CANCELLED(0x6401, "Process aborted by pressing of CANCEL key"),
+    INPUT_NOT_IDENTICAL(0x6402, "Repeated input of the new PIN not identical (CT-BCS/MKT)"),
+    WRONG_PARAMETERS_FUNCTIONAL_UNIT(0x6A00, "Wrong parameters P1, P2 (invalid functional unit)"),
+    TOO_MANY_DATA_OBJECTS(0x6A89, "Too many data objects of the same type"),
     NO_INFORMATION(0x6400, "No information given (state unchanged)"),
     SICCT_CONTROL_RESPONSE(0x6200, "SICCT control response"),
     WRONG_LENGTH(0x6700, "Wrong length");

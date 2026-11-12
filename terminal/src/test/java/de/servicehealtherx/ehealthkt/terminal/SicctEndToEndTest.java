@@ -132,7 +132,8 @@ class SicctEndToEndTest {
     @Test
     void fullPairingCardAccessAndPinFlow() throws Exception {
         // 1) INIT CT SESSION
-        assertThat(Hex.toHex(roundTrip((short) 0, (short) 1, "80280000").getBody())).isEqualTo("9000");
+        assertThat(Hex.toHex(roundTrip((short) 0, (short) 1, "80280000").getBody()))
+                .isEqualTo("691213001300130C" + "303030303030303030303031" + "9000");
 
         // 2) EHEALTH TERMINAL AUTHENTICATE CREATE: D4 10 <secret> 50 09 "Konnektor"
         byte[] label = "Konnektor".getBytes();
@@ -170,7 +171,11 @@ class SicctEndToEndTest {
                 .isEqualTo("9000");
 
         // 6) PERFORM VERIFICATION on slot 2 -> headless UI supplies PIN 123456 -> 9000
-        assertThat(Hex.toHex(roundTrip((short) 0, (short) 6, "801802F1").getBody())).isEqualTo("9000");
+        //    CMD DO: control 02 (variable length, format-2 PIN block), insertion position 6,
+        //    template VERIFY 00 20 00 81 08 20FFFFFFFFFFFFFF.
+        assertThat(Hex.toHex(roundTrip((short) 0, (short) 6,
+                "80180250" + "11" + "520F" + "0206" + "0020008108" + "20FFFFFFFFFFFFFF").getBody()))
+                .isEqualTo("9000");
 
         // 7) CLOSE CT SESSION
         assertThat(Hex.toHex(roundTrip((short) 0, (short) 7, "80290000").getBody())).isEqualTo("9000");

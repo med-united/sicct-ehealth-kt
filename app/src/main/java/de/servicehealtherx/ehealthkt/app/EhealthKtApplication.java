@@ -99,6 +99,10 @@ public class EhealthKtApplication implements Callable<Integer> {
             + "access: 'user = password, ROLE[, ROLE]' (roles: CT_ADMIN, CT_CONTROL).")
     Path jmxUsersFile;
 
+    @Option(names = "--software-pin", description = "Enter every PIN on the terminal UI (or via JMX "
+            + "with --jmx) instead of on the PIN pad of a PC/SC reader that has one. Default: false.")
+    boolean softwarePin;
+
     @Option(names = "--reader-idle", description = "Reader idle timeout (s). Default: 119")
     int readerIdle = 119;
 
@@ -135,7 +139,7 @@ public class EhealthKtApplication implements Callable<Integer> {
 
         SicctTlsServer server = new SicctTlsServer(port, sslContext,
                 () -> new SicctCommandInterpreter(cards, ui, pairingStore, authenticate,
-                        KonnektorCertValidator.acceptAll(), sessions),
+                        KonnektorCertValidator.acceptAll(), sessions, !softwarePin),
                 readerIdle, writerIdle);
 
         ServiceDiscoveryServer discovery = noDiscovery ? null : new ServiceDiscoveryServer(port, terminalName);

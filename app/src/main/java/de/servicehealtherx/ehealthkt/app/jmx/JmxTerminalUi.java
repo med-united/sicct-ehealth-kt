@@ -77,7 +77,12 @@ public class JmxTerminalUi implements TerminalUi {
     @Override
     public char[] requestPin(PinRequest request) {
         String line1 = request.prompt();
-        String line2 = "slot " + request.slot();
+        String line2 = "slot " + request.slot() + ", " + request.minLength() + "-" + request.maxLength()
+                + " digits";
+        // The Konnektor's waiting time bounds the entry: answering later would hit a command the
+        // Konnektor has already given up on.
+        long waitMillis = request.timeoutSeconds() > 0
+                ? Math.min(timeoutMillis, request.timeoutSeconds() * 1000L) : timeoutMillis;
         Pending<char[]> pending = new Pending<>(line1, line2, new CompletableFuture<>());
         if (!pendingPin.compareAndSet(null, pending)) {
             log.warn("PIN request for slot {} rejected: another PIN entry is already pending", request.slot());
@@ -87,9 +92,9 @@ public class JmxTerminalUi implements TerminalUi {
         log.info("Awaiting JMX PIN entry for slot {} (ref 0x{})", request.slot(),
                 Integer.toHexString(request.pinReference() & 0xFF));
         try {
-            return pending.future().get(timeoutMillis, TimeUnit.MILLISECONDS);
+            return pending.future().get(waitMillis, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
-            log.warn("PIN entry for slot {} timed out after {} ms; cancelling", request.slot(), timeoutMillis);
+            log.warn("PIN entry for slot {} timed out after {} ms; cancelling", request.slot(), waitMillis);
             return null;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -136,7 +141,8 @@ public class JmxTerminalUi implements TerminalUi {
      *  if no PIN was being requested. */
     public boolean resolvePin(char[] pin) {
         Pending<char[]> p = pendingPin.get();
-        return p != null && p.future().complete(pin);
+        // An empty array tells the caller the entry was cancelled (as opposed to timed out).
+        return p != null && p.future().complete(pin == null ? new char[0] : pin);
     }
 
     @Override

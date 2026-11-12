@@ -227,6 +227,9 @@ public class EhealthKtManagement implements EhealthKtManagementMBean, Management
         if (pin == null || pin.isEmpty()) {
             throw new IllegalArgumentException("PIN must not be empty");
         }
+        if (!pin.chars().allMatch(c -> c >= '0' && c <= '9')) {
+            throw new IllegalArgumentException("PIN must consist of digits only");
+        }
         if (!ui.resolvePin(pin.toCharArray())) {
             throw new IllegalStateException("No PIN entry is pending");
         }

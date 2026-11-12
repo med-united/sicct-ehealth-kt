@@ -80,7 +80,11 @@ public interface EhealthKtManagementMBean {
     /** The pending PIN prompt (slot/reference info), or "" if none is pending. */
     String getPinPrompt();
 
-    /** Supply the PIN for the pending PERFORM VERIFICATION. Throws if none is pending. */
+    /**
+     * Supply the PIN (digits only) for the pending PERFORM VERIFICATION / MODIFY VERIFICATION DATA,
+     * including a Remote-PIN entry. A PIN change asks three times (old, new, repetition); see
+     * {@link #getPinPrompt()} for what is currently requested. Throws if none is pending.
+     */
     void enterPin(String pin);
 
     /** Cancel the pending PIN entry (treated as a timeout/abort). Throws if none is pending. */

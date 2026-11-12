@@ -92,4 +92,44 @@ class GetStatusTest {
         // ICCS DO: tag 80, len 01, status of slot 2 (present), then SW 9000.
         assertThat(Hex.toHex(response.getBody())).isEqualTo("8001019000");
     }
+
+    /** INIT CT SESSION answers with the CT Session DO carrying a terminal-assigned session id. */
+    @Test
+    void initCtSessionReturnsSessionDataObject() {
+        EmbeddedChannel channel = channelWith(new CardSlotManager(new SimulatedCardSlotBackend(2)));
+
+        channel.writeInbound(SicctMessage.of(MessageType.COMMAND, (short) 0, (short) 4,
+                Hex.toBytes("8028000008690613001300130000")));
+        SicctMessage response = channel.readOutbound();
+
+        assertThat(Hex.toHex(response.getBody()))
+                .isEqualTo("691213001300130C" + "303030303030303030303031" + "9000");
+    }
+
+    /** GET STATUS P2='63' -> CardTerminal Status DO: functional units, ICC status, max APDU length. */
+    @Test
+    void getCardTerminalStatusListsFunctionalUnitsAndIccStatus() {
+        SimulatedCardSlotBackend backend = new SimulatedCardSlotBackend(2);
+        backend.simulatedSlot(2).insert(ScriptedVirtualCard.egk());
+        EmbeddedChannel channel = channelWith(new CardSlotManager(backend));
+
+        channel.writeInbound(SicctMessage.of(MessageType.COMMAND, (short) 0, (short) 5,
+                Hex.toBytes("8013006300")));
+        SicctMessage response = channel.readOutbound();
+
+        assertThat(Hex.toHex(response.getBody()))
+                .isEqualTo("6312" + "81080001000240005000" + "80020001" + "0402800A" + "9000");
+    }
+
+    @Test
+    void getStatusReturnsCapabilityDataObjects() {
+        EmbeddedChannel channel = channelWith(new CardSlotManager(new SimulatedCardSlotBackend(1)));
+
+        channel.writeInbound(SicctMessage.of(MessageType.COMMAND, (short) 0, (short) 6, Hex.toBytes("8013008100")));
+        assertThat(Hex.toHex(((SicctMessage) channel.readOutbound()).getBody())).isEqualTo("8106000140005000" + "9000");
+        channel.writeInbound(SicctMessage.of(MessageType.COMMAND, (short) 0, (short) 7, Hex.toBytes("8013016600")));
+        assertThat(Hex.toHex(((SicctMessage) channel.readOutbound()).getBody())).startsWith("6619800101").endsWith("9000");
+        channel.writeInbound(SicctMessage.of(MessageType.COMMAND, (short) 0, (short) 8, Hex.toBytes("8013406700")));
+        assertThat(Hex.toHex(((SicctMessage) channel.readOutbound()).getBody())).startsWith("6715800130").endsWith("9000");
+    }
 }

@@ -80,11 +80,36 @@ If JavaFX is missing at runtime the app logs a warning and falls back to the hea
 Key options: `--port`, `--ui HEADLESS|JAVAFX`, `--pairing-file`, `--pin`, `--terminal-name`,
 `--tsl-production`, `--no-konnektor-trust`, `--no-discovery`. See `--help`.
 
-## Secure PIN entry
+## PIN entry
 
-If the PC/SC reader exposes a secure PIN pad (`FEATURE_VERIFY_PIN_DIRECT`), PIN verification runs
-on the reader. Otherwise the PIN is entered on the terminal UI ("remote PIN") and sent to the card
-as an ISO format-2 PIN block. The verify APDUs follow the eHBA reference implementation.
+`SICCT PERFORM VERIFICATION` and `SICCT MODIFY VERIFICATION DATA` are implemented per SICCT 5.19 /
+5.20: the terminal shows the display message the Konnektor sent, collects the PIN(s), inserts them
+into the chipcard command of the Command-To-Perform DO (BCD, ASCII or ISO 9564-1 format-2 PIN block
+at the given insertion position), sends that command to the addressed slot and returns the card's
+response APDU unchanged. Timeouts answer `6400`, a cancelled entry `6401`, a differing repetition
+of a new PIN `6402`.
+
+Where the PIN is entered:
+
+- **Terminal UI** (default): the JavaFX keypad, the fixed `--pin` of the headless UI, or — with
+  `--jmx` — the JMX operations `enterPin(String)` / `cancelPin()` (`PinPending` / `PinPrompt` tell
+  what is being asked for; a PIN change asks three times: old, new, repetition).
+- **Reader PIN pad**: if the PC/SC reader holding the card exposes `FEATURE_VERIFY_PIN_DIRECT`, a
+  plain format-2 `VERIFY` runs on the reader. Start with `--software-pin` to enter every PIN on
+  the terminal UI / via JMX instead.
+
+### Remote PIN
+
+The terminal can serve as a **Remote-PIN-KT** (gemSpec_Kon TIP1-A_5012): the HBA/SMC-B sits in
+another terminal, the PIN is entered here. The Konnektor first builds a trusted channel between
+this terminal's gSMC-KT (slot 1) and the target card, then sends `PERFORM VERIFICATION` for slot 1
+with a `PSO ENCIPHER` as the command to perform. The terminal inserts the PIN block, the gSMC-KT
+enciphers it with the session key and the cryptogram is returned to the Konnektor. No card other
+than the gSMC-KT needs to be present in this terminal.
+
+```bash
+java -jar app/target/ehealth-kt.jar --jmx --software-pin   # pair, then assign as Remote-PIN-KT in the Konnektor
+```
 
 ## Status / scope
 
